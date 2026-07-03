@@ -53,6 +53,20 @@ interface MessageAttachment {
     height?: number;
 }
 
+interface EmbedMedia {
+    url?: string;
+    proxy_url?: string;
+    width?: number;
+    height?: number;
+}
+
+export interface MessageEmbed {
+    type?: string;
+    thumbnail?: EmbedMedia;
+    image?: EmbedMedia;
+    video?: EmbedMedia;
+}
+
 export interface MessageHit {
     id: string;
     content: string;
@@ -66,7 +80,7 @@ export interface MessageHit {
     };
     timestamp: string;
     attachments?: MessageAttachment[];
-    embeds?: unknown[];
+    embeds?: MessageEmbed[];
     pinned?: boolean;
     flags?: number;
 }

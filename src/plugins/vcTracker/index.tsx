@@ -5,17 +5,19 @@
  */
 
 import { sendBotMessage } from "@api/Commands";
-import type { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import * as DataStore from "@api/DataStore";
 import { definePluginSettings } from "@api/Settings";
+import { Camera, Deafened, MicrophoneMuted, ScreenshareIcon } from "@components/Icons";
 import { Devs } from "@utils/constants";
-import { copyWithToast } from "@utils/discord";
+import { copyWithToast, openUserProfile } from "@utils/discord";
 import { Logger } from "@utils/Logger";
 import { useAwaiter } from "@utils/react";
 import definePlugin, { OptionType, ReporterTestable } from "@utils/types";
 import type { Channel, RenderModalProps, User } from "@vencord/discord-types";
-import { Button, ChannelStore, ConfirmModal, Forms, GuildMemberStore, GuildStore, IconUtils, Menu, Modal, openModal, ScrollerThin, SelectedChannelStore, showToast, Timestamp, Toasts, useEffect, useReducer, UserStore, VoiceStateStore } from "@webpack/common";
+import { ChannelType } from "@vencord/discord-types/enums";
+import { Button, ChannelStore, ConfirmModal, Forms, GuildMemberStore, GuildStore, IconUtils, Modal, openModal, ScrollerThin, SelectedChannelStore, showToast, Timestamp, Toasts, useEffect, useReducer, UserStore, VoiceStateStore } from "@webpack/common";
 import { nanoid } from "nanoid";
+import type { JSX, KeyboardEvent } from "react";
 
 type EventType = "snapshot" | "join" | "leave" | "move" | "state-update";
 type StatusValue = boolean | string | null | undefined;
@@ -85,6 +87,8 @@ interface SessionSnapshot {
     endedAt?: number;
     durationMs?: number;
     nextStartedAt?: number;
+    /** True when endedAt/durationMs are a best guess rather than a directly observed transition. */
+    approximate?: boolean;
 }
 
 interface ActiveVoiceSession {
@@ -98,6 +102,12 @@ interface ActiveVoiceSession {
 interface TrackedVoiceEvent {
     id: string;
     type: EventType;
+    /**
+     * "live" events come straight from a VOICE_STATE_UPDATES dispatch. "reconciled" events are
+     * reconstructed at startup by comparing the persisted session against the current voice
+     * state, so their timing (especially a "leave"'s duration) is only a best guess.
+     */
+    source: "live" | "reconciled";
     timestamp: number;
     isoTime: string;
     trackedUser: UserSnapshot;
@@ -122,6 +132,14 @@ interface TrackedVoiceEvent {
 const LOG_KEY = "vcTracker:events:v1";
 const ACTIVE_SESSIONS_KEY = "vcTracker:activeSessions:v1";
 const logger = new Logger("VcTracker");
+
+/**
+ * On a fresh client launch, VoiceStateStore can still be hydrating when the plugin starts, so a
+ * user who's actually still in the same call can briefly look like they've left. Waiting this
+ * long before trusting an "empty" result avoids logging a false leave immediately followed by a
+ * false rejoin for the same ongoing call.
+ */
+const RECONCILE_RETRY_DELAY_MS = 4000;
 
 const settings = definePluginSettings({
     trackedUserIds: {
@@ -191,20 +209,6 @@ function parseUserIds(value?: string) {
 
 function getTrackedUserIds() {
     return parseUserIds(settings.store.trackedUserIds);
-}
-
-function toggleTrackedUser(userId: string) {
-    const ids = getTrackedUserIds();
-    const index = ids.indexOf(userId);
-    const adding = index === -1;
-
-    if (adding) ids.push(userId);
-    else ids.splice(index, 1);
-
-    settings.store.trackedUserIds = ids.join(",");
-    showToast(`${adding ? "Added to" : "Removed from"} VC Tracker`, Toasts.Type.SUCCESS);
-
-    if (adding) void seedCurrentTrackedUsers(false);
 }
 
 function getUserSnapshot(userId: string, guildId?: string | null): UserSnapshot {
@@ -358,7 +362,7 @@ function getEventType(state: VoiceStateUpdate, previousSession?: ActiveVoiceSess
     return channelId ? "state-update" : undefined;
 }
 
-function buildEvent(state: VoiceStateUpdate, forcedType?: EventType): { event: TrackedVoiceEvent | null; sessionsChanged: boolean; } {
+function buildEvent(state: VoiceStateUpdate, forcedType?: EventType, source: TrackedVoiceEvent["source"] = "live"): { event: TrackedVoiceEvent | null; sessionsChanged: boolean; } {
     const now = Date.now();
     const { userId } = state;
     const previousSession = activeSessions[userId];
@@ -418,6 +422,9 @@ function buildEvent(state: VoiceStateUpdate, forcedType?: EventType): { event: T
                 startedAt,
                 endedAt: now,
                 durationMs: now - startedAt,
+                // A reconciled leave means we only just noticed they're gone after a restart -
+                // the real leave time could be anywhere between startedAt and now.
+                approximate: source === "reconciled",
             };
             break;
         }
@@ -437,6 +444,7 @@ function buildEvent(state: VoiceStateUpdate, forcedType?: EventType): { event: T
     const event: TrackedVoiceEvent = {
         id: nanoid(),
         type,
+        source,
         timestamp: now,
         isoTime: new Date(now).toISOString(),
         trackedUser: getUserSnapshot(userId, guildId),
@@ -541,13 +549,28 @@ function formatStatus(voice: VoiceStatusSnapshot) {
     return parts.length ? parts.join(", ") : "normal";
 }
 
+/** Guild name when there is one, otherwise a DM/Group DM label instead of a misleading "unknown server". */
+function getChannelContextLabel(guild: EntitySnapshot | null, channel: EntitySnapshot | null) {
+    if (guild) return guild.name ?? guild.id;
+    if (channel?.type === ChannelType.GROUP_DM) return "Group DM";
+    if (channel?.type === ChannelType.DM) return "Direct Message";
+    return "Unknown server";
+}
+
+function formatSessionDuration(session?: SessionSnapshot) {
+    if (session?.durationMs == null) return "";
+
+    const duration = formatDuration(session.durationMs);
+    return session.approximate ? `~${duration} (exact time unknown, Vencord was closed)` : duration;
+}
+
 function formatChatEvent(event: TrackedVoiceEvent) {
     const user = event.trackedUser.name ?? event.trackedUser.id;
-    const guild = event.guild?.name ?? event.guild?.id ?? "unknown server";
+    const guild = getChannelContextLabel(event.guild, event.channel ?? event.oldChannel);
     const channel = event.channel?.name ?? event.channel?.id;
     const oldChannel = event.oldChannel?.name ?? event.oldChannel?.id;
     const members = event.channelMembers.length || event.oldChannelMembers.length;
-    const duration = formatDuration(event.session?.durationMs);
+    const duration = formatSessionDuration(event.session);
 
     switch (event.type) {
         case "snapshot":
@@ -622,8 +645,23 @@ async function seedCurrentTrackedUsers(showDoneToast = true) {
         sessionsChanged = true;
     }
 
+    const currentStates = new Map(
+        trackedUserIds.map(userId => [userId, VoiceStateStore.getVoiceStateForUser(userId) as VoiceStateUpdate | undefined])
+    );
+
+    // A user who has a persisted session but no current voice state might just be caught
+    // mid-hydration - recheck once after a delay before treating it as a real leave.
+    const pendingRecheck = trackedUserIds.filter(userId => !currentStates.get(userId)?.channelId && activeSessions[userId]);
+
+    if (pendingRecheck.length) {
+        await new Promise(resolve => setTimeout(resolve, RECONCILE_RETRY_DELAY_MS));
+        for (const userId of pendingRecheck) {
+            currentStates.set(userId, VoiceStateStore.getVoiceStateForUser(userId) as VoiceStateUpdate | undefined);
+        }
+    }
+
     for (const userId of trackedUserIds) {
-        const state = VoiceStateStore.getVoiceStateForUser(userId) as VoiceStateUpdate | undefined;
+        const state = currentStates.get(userId);
         const activeSession = activeSessions[userId];
         const eventState = state?.channelId
             ? state
@@ -637,7 +675,7 @@ async function seedCurrentTrackedUsers(showDoneToast = true) {
         if (!eventState) continue;
 
         const forceSnapshot = !activeSession && Boolean(eventState.channelId);
-        const result = buildEvent(eventState, forceSnapshot ? "snapshot" : undefined);
+        const result = buildEvent(eventState, forceSnapshot ? "snapshot" : undefined, "reconciled");
 
         if (!result.event) continue;
 
@@ -669,20 +707,29 @@ function useTrackerLogs() {
     return [logs, pending] as const;
 }
 
-function EntityIcon({ entity, size = 32 }: { entity?: EntitySnapshot | UserSnapshot | null; size?: number; }) {
+function EntityIcon({ entity, size = 32, onClick }: { entity?: EntitySnapshot | UserSnapshot | null; size?: number; onClick?: () => void; }) {
     const label = entity?.name ?? entity?.id ?? "?";
+    const clickableProps = onClick ? {
+        role: "button" as const,
+        tabIndex: 0,
+        onClick,
+        onKeyDown: (e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") onClick(); },
+        style: { cursor: "pointer" },
+    } : {};
 
     if (entity?.iconUrl) {
         return (
             <img
                 src={entity.iconUrl}
                 alt=""
+                {...clickableProps}
                 style={{
                     width: size,
                     height: size,
                     borderRadius: "50%",
                     objectFit: "cover",
                     flex: "0 0 auto",
+                    ...clickableProps.style,
                 }}
             />
         );
@@ -690,6 +737,7 @@ function EntityIcon({ entity, size = 32 }: { entity?: EntitySnapshot | UserSnaps
 
     return (
         <div
+            {...clickableProps}
             style={{
                 width: size,
                 height: size,
@@ -701,6 +749,7 @@ function EntityIcon({ entity, size = 32 }: { entity?: EntitySnapshot | UserSnaps
                 color: "var(--text-muted)",
                 fontSize: Math.max(11, Math.floor(size / 2.4)),
                 fontWeight: 700,
+                ...clickableProps.style,
             }}
         >
             {label[0]?.toUpperCase() ?? "?"}
@@ -728,22 +777,31 @@ function EventPill({ label, color }: { label: string; color: string; }) {
     );
 }
 
-function StatusPill({ label, active }: { label: string; active: boolean; }) {
+const statusIconDefs: Array<{
+    key: "muted" | "deafened" | "selfVideo" | "selfStream";
+    label: string;
+    Icon: (props: { width: number; height: number; }) => JSX.Element;
+    color: string;
+}> = [
+    { key: "deafened", label: "Deafened", Icon: Deafened, color: "var(--status-danger)" },
+    { key: "muted", label: "Muted", Icon: MicrophoneMuted, color: "var(--status-danger)" },
+    { key: "selfVideo", label: "Camera on", Icon: Camera, color: "var(--status-positive)" },
+    { key: "selfStream", label: "Streaming", Icon: ScreenshareIcon, color: "var(--status-positive)" },
+];
+
+/** Only renders icons for states that are actually active, instead of a wall of always-visible pills. */
+function StatusIconRow({ voice }: { voice: VoiceStatusSnapshot; }) {
+    const active = statusIconDefs.filter(({ key }) => voice[key]);
+    if (!active.length) return null;
+
     return (
-        <span
-            style={{
-                display: "inline-flex",
-                alignItems: "center",
-                minHeight: 20,
-                padding: "0 7px",
-                borderRadius: 4,
-                background: active ? "var(--status-danger)" : "var(--background-modifier-accent)",
-                color: active ? "white" : "var(--text-muted)",
-                fontSize: 12,
-            }}
-        >
-            {label}
-        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {active.map(({ key, label, Icon, color }) => (
+                <div key={key} title={label} style={{ color, display: "flex" }}>
+                    <Icon width={16} height={16} />
+                </div>
+            ))}
+        </div>
     );
 }
 
@@ -763,7 +821,7 @@ function MembersPreview({ members }: { members: ChannelMemberSnapshot[]; }) {
                         title={`${member.user.name ?? member.user.id} (${formatStatus(member.voice)})`}
                         style={{ marginLeft: -4 }}
                     >
-                        <EntityIcon entity={member.user} size={24} />
+                        <EntityIcon entity={member.user} size={24} onClick={() => openUserProfile(member.user.id)} />
                     </div>
                 ))}
                 {!!extra && (
@@ -790,7 +848,7 @@ function EventRow({ event }: { event: TrackedVoiceEvent; }) {
                 borderBottom: "1px solid var(--background-modifier-accent)",
             }}
         >
-            <EntityIcon entity={event.trackedUser} size={48} />
+            <EntityIcon entity={event.trackedUser} size={48} onClick={() => openUserProfile(event.trackedUser.id)} />
             <div style={{ minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <EventPill label={meta.label} color={meta.color} />
@@ -803,26 +861,26 @@ function EventRow({ event }: { event: TrackedVoiceEvent; }) {
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, minWidth: 0 }}>
                     <EntityIcon entity={event.guild} size={24} />
                     <Forms.FormText style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {event.guild?.name ?? event.guild?.id ?? "Unknown server"}
+                        {getChannelContextLabel(event.guild, event.channel ?? event.oldChannel)}
                         {" / "}
                         {event.oldChannel && event.channel && event.oldChannel.id !== event.channel.id
                             ? `${event.oldChannel.name ?? event.oldChannel.id} -> ${event.channel.name ?? event.channel.id}`
                             : event.channel?.name ?? event.oldChannel?.name ?? event.channel?.id ?? event.oldChannel?.id ?? "No channel"}
                     </Forms.FormText>
+                    <StatusIconRow voice={event.voice} />
                 </div>
 
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
-                    <StatusPill label="Muted" active={event.voice.muted} />
-                    <StatusPill label="Deafened" active={event.voice.deafened} />
-                    <StatusPill label="Camera" active={event.voice.selfVideo} />
-                    <StatusPill label="Stream" active={event.voice.selfStream} />
-                    <StatusPill label="Suppressed" active={event.voice.suppress} />
-                    {!!event.session?.durationMs && (
-                        <span style={{ color: "var(--text-muted)", fontSize: 12, alignSelf: "center" }}>
-                            Duration: {formatDuration(event.session.durationMs)}
-                        </span>
-                    )}
-                </div>
+                {!!event.session?.durationMs && (
+                    <Forms.FormText style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 12 }}>
+                        Duration: {formatSessionDuration(event.session)}
+                    </Forms.FormText>
+                )}
+
+                {event.source === "reconciled" && (
+                    <Forms.FormText style={{ marginTop: 4, color: "var(--status-warning)", fontSize: 12 }}>
+                        Detected after Vencord (re)started - exact timing may not be precise.
+                    </Forms.FormText>
+                )}
 
                 {!!event.changes.length && (
                     <Forms.FormText style={{ marginTop: 8 }}>
@@ -833,10 +891,6 @@ function EventRow({ event }: { event: TrackedVoiceEvent; }) {
                 <div style={{ marginTop: 8 }}>
                     <MembersPreview members={members} />
                 </div>
-
-                <Forms.FormText style={{ marginTop: 8, fontFamily: "var(--font-code)" }}>
-                    user={event.trackedUser.id} guild={event.raw.guildId ?? "none"} channel={event.raw.channelId ?? event.raw.oldChannelId ?? "none"}
-                </Forms.FormText>
             </div>
         </div>
     );
@@ -901,20 +955,6 @@ function SettingsAboutComponent() {
     );
 }
 
-const userContextMenuPatch: NavContextMenuPatchCallback = (children, { user }: { user?: User; }) => {
-    if (!user) return;
-
-    // const isTracked = getTrackedUserIds().includes(user.id);
-
-    // children.splice(-1, 0,
-    //     <Menu.MenuItem
-    //         id="vc-tracker-toggle-user"
-    //         label={isTracked ? "Remove from VC Tracker" : "Add to VC Tracker"}
-    //         action={() => toggleTrackedUser(user.id)}
-    //     />
-    // );
-};
-
 export default definePlugin({
     name: "vcTracker",
     description: "Tracks configured users across voice calls and stores a rich local voice activity history.",
@@ -923,12 +963,6 @@ export default definePlugin({
     reporterTestable: ReporterTestable.None,
 
     settings,
-
-    contextMenus: {
-        "user-context": userContextMenuPatch,
-        "user-profile-actions": userContextMenuPatch,
-        "user-profile-overflow-menu": userContextMenuPatch,
-    },
 
     flux: {
         VOICE_STATE_UPDATES({ voiceStates }: { voiceStates: VoiceStateUpdate[]; }) {

@@ -32,12 +32,9 @@ export function Tabs({ query, totals, loading, active, on_pick }: Props) {
     const tabs_with_hits = visible.length - 1;
     if (!tabs_with_hits && !loading) return null;
 
-    const all_total = (Object.keys(totals) as SearchTab[]).reduce((sum, t) => sum + totals[t], 0);
-
     return (
         <div className="vc-dms-tabs">
             {visible.map(tab => {
-                const count = tab === "all" ? all_total : totals[tab];
                 const is_active = tab === active;
                 return (
                     <button
@@ -51,7 +48,7 @@ export function Tabs({ query, totals, loading, active, on_pick }: Props) {
                         }}
                     >
                         <span>{LABELS[tab]}</span>
-                        {tab !== "all" && <span className="vc-dms-tab-count">{count}</span>}
+                        {tab !== "all" && <span className="vc-dms-tab-count">{totals[tab]}</span>}
                     </button>
                 );
             })}

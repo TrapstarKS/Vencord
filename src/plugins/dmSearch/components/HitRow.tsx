@@ -89,17 +89,39 @@ function TextBody({ content, query }: { content: string; query: string; }) {
     return <div className="vc-dms-text">{highlight(content, query)}</div>;
 }
 
+interface Thumb {
+    key: string;
+    src: string;
+    video: boolean;
+}
+
+const MEDIA_EMBED_TYPES = new Set(["image", "gifv", "video"]);
+
+function media_thumbs(hit: MessageHit): Thumb[] {
+    const out: Thumb[] = [];
+    for (const a of hit.attachments ?? []) {
+        if (a.content_type?.startsWith?.("image/")) out.push({ key: a.id, src: a.proxy_url, video: false });
+        else if (a.content_type?.startsWith?.("video/")) out.push({ key: a.id, src: a.proxy_url, video: true });
+    }
+    // Media hits are often link-based (Tenor GIFs, image links, YouTube) and carry no attachment —
+    // only an embed with a preview image. Fall back to the embed thumbnail so they aren't blank.
+    (hit.embeds ?? []).forEach((e, i) => {
+        if (!MEDIA_EMBED_TYPES.has(e.type ?? "")) return;
+        const src = e.image?.proxy_url ?? e.thumbnail?.proxy_url;
+        if (src) out.push({ key: `e${i}`, src, video: false });
+    });
+    return out;
+}
+
 function MediaBody({ hit }: { hit: MessageHit; }) {
-    const items = (hit.attachments ?? []).filter(a =>
-        a.content_type?.startsWith?.("image/") || a.content_type?.startsWith?.("video/")
-    );
+    const items = media_thumbs(hit);
     return (
         <div className="vc-dms-media">
             {items.length > 0 && (
                 <div className="vc-dms-thumbs">
-                    {items.slice(0, 4).map(a => a.content_type?.startsWith?.("video/")
-                        ? <video key={a.id} className="vc-dms-thumb" src={a.proxy_url} muted preload="metadata" />
-                        : <img key={a.id} className="vc-dms-thumb" src={a.proxy_url} alt={a.filename ?? ""} loading="lazy" />
+                    {items.slice(0, 4).map(item => item.video
+                        ? <video key={item.key} className="vc-dms-thumb" src={item.src} muted preload="metadata" />
+                        : <img key={item.key} className="vc-dms-thumb" src={item.src} alt="" loading="lazy" />
                     )}
                 </div>
             )}

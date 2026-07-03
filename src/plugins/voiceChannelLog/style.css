@@ -1,0 +1,71 @@
+.vc-vcl-modal {
+    padding: 8px 0;
+}
+
+.vc-vcl-empty {
+    color: var(--text-muted);
+    padding: 16px 0;
+    text-align: center;
+}
+
+.vc-vcl-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.vc-vcl-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 4px;
+    border-bottom: 1px solid var(--background-modifier-accent);
+}
+
+.vc-vcl-avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.vc-vcl-info {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    flex-grow: 1;
+    min-width: 0;
+    flex-wrap: wrap;
+}
+
+.vc-vcl-name {
+    font-weight: 600;
+    color: var(--header-primary);
+}
+
+.vc-vcl-action {
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.vc-vcl-join {
+    color: var(--green-360, #23a55a);
+}
+
+.vc-vcl-leave {
+    color: var(--status-danger, #f23f43);
+}
+
+.vc-vcl-channel {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vc-vcl-time {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+}

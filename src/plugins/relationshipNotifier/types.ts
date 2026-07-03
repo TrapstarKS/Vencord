@@ -51,3 +51,8 @@ export interface SimpleGuild {
     name: string;
     iconURL?: string;
 }
+
+export interface FriendGuildSnapshot {
+    guildIds: string[];
+    lastScannedAt: number;
+}

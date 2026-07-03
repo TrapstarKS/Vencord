@@ -20,6 +20,7 @@ import { getUniqueUsername, openUserProfile } from "@utils/discord";
 import { ChannelType, RelationshipType } from "@vencord/discord-types/enums";
 import { UserUtils } from "@webpack/common";
 
+import { removeFriendGuildSnapshot } from "./mutualGuilds";
 import settings from "./settings";
 import { ChannelDelete, GuildDelete, RelationshipRemove } from "./types";
 import { deleteGroup, deleteGuild, getGroup, getGuild, GuildAvailabilityStore, notify } from "./utils";
@@ -35,6 +36,7 @@ export const removeGroup = (id: string) => manuallyRemovedGroup = id;
 export async function onRelationshipRemove({ relationship: { type, id } }: RelationshipRemove) {
     if (manuallyRemovedFriend === id) {
         manuallyRemovedFriend = undefined;
+        if (type === RelationshipType.FRIEND) removeFriendGuildSnapshot(id);
         return;
     }
 
@@ -50,6 +52,7 @@ export async function onRelationshipRemove({ relationship: { type, id } }: Relat
                     user.getAvatarURL(undefined, undefined, false),
                     () => openUserProfile(user.id)
                 );
+            removeFriendGuildSnapshot(id);
             break;
         case RelationshipType.INCOMING_REQUEST:
             if (settings.store.friendRequestCancels)

@@ -10,7 +10,7 @@ import { Devs } from "@utils/constants";
 import { localStorage } from "@utils/localStorage";
 import definePlugin, { OptionType } from "@utils/types";
 import { FluxStore } from "@vencord/discord-types";
-import { find, findLazy, findStoreLazy } from "@webpack";
+import { find, findStoreLazy } from "@webpack";
 import { FluxDispatcher, RestAPI } from "@webpack/common";
 
 const STORAGE_KEY = "vc-questNotifier-seen-v1";
@@ -244,6 +244,7 @@ function notificationCheck() {
         if (expiresAt && new Date(expiresAt).getTime() <= Date.now()) continue;
 
         notifyNewQuest(quest);
+        handleNewQuest(quest);
     }
 
     for (const id of seen) {
@@ -264,8 +265,13 @@ const pending: Quest[] = []; // queue of quests to complete
 let stopCompletions = false;
 
 // Lazy‑found stores used by spoofers
-const ApplicationStreamingStore = findLazy(m => m.A?.getStreamerActiveStreamMetadata).A;
-const RunningGameStore = findLazy(m => m.Ay?.getRunningGames).Ay;
+// Resolve on first use (memoized) instead of at import time. Doing `findLazy(...).A` eagerly
+// forces the lazy proxy to resolve during module import; if the module isn't loaded/renamed yet
+// that throws (undefined access / "proxyLazy called on a primitive") and breaks plugin registration.
+let _appStreamingStore: any;
+const getAppStreamingStore = () => (_appStreamingStore ??= find(m => m.A?.getStreamerActiveStreamMetadata, { isIndirect: true })?.A);
+let _runningGameStore: any;
+const getRunningGameStore = () => (_runningGameStore ??= find(m => m.Ay?.getRunningGames, { isIndirect: true })?.Ay);
 const ChannelStore = findStoreLazy("ChannelStore");
 const GuildChannelStore = findStoreLazy("GuildChannelStore") as FluxStore & {
     getAllGuilds(): Record<string, { VOCAL?: Array<{ channel?: { id?: string; }; }>; }>;
@@ -326,6 +332,24 @@ function enqueueEligible(quests: Quest[]) {
         pending.push(q);
         console.log(`[QuestNotifier] Queued: ${q.config?.messages?.questName}`);
     }
+}
+
+// Reacts to a freshly detected quest right away instead of waiting for watchNewQuestsLoop's
+// next periodic scan (up to ~enrollCheckIntervalHours later). Mirrors the enroll+queue steps
+// watchNewQuestsLoop already does for a single quest; the existing enrollingIds/enrolledIds/
+// failedEnrollIds/processedIds guards make this safe to run alongside that loop.
+async function handleNewQuest(quest: Quest) {
+    if (!isSupported(quest)) return;
+
+    if (shouldEnroll(quest)) {
+        await sleep(bell(8000, 2200));
+        if (stopCompletions) return;
+        const enrolled = await enrollQuest(quest);
+        if (!enrolled) return;
+        await sleep(bell(2500, 400));
+    }
+
+    if (isEligibleForCompletion(quest)) enqueueEligible([quest]);
 }
 
 const TASK_SETTING_KEYS: Record<string, "watchVideo" | "playOnDesktop" | "streamOnDesktop" | "playActivity"> = {
@@ -427,6 +451,11 @@ async function watchVideo(quest: Quest, secondsNeeded: number, secondsDone: numb
 
 async function playOnDesktop(quest: Quest, applicationId: string, secondsNeeded: number, secondsDone: number, pid: number) {
     console.log(`[QuestNotifier] playOnDesktop: ${quest.config?.messages?.questName} (${secondsDone}/${secondsNeeded}s done)`);
+    const RunningGameStore = getRunningGameStore();
+    if (!RunningGameStore) {
+        console.log("[QuestNotifier] RunningGameStore indisponível; pulando playOnDesktop.");
+        return;
+    }
     const res = await RestAPI.get({ url: `/applications/public?application_ids=${applicationId}` });
     const appData = res.body[0];
     const exeName = appData.executables?.find((x: any) => x.os === "win32")?.name?.replace(">", "")
@@ -496,6 +525,11 @@ async function playOnDesktop(quest: Quest, applicationId: string, secondsNeeded:
 
 async function streamOnDesktop(quest: Quest, applicationId: string, secondsNeeded: number, pid: number) {
     console.log(`[QuestNotifier] streamOnDesktop: ${quest.config?.messages?.questName}`);
+    const ApplicationStreamingStore = getAppStreamingStore();
+    if (!ApplicationStreamingStore) {
+        console.log("[QuestNotifier] ApplicationStreamingStore indisponível; pulando streamOnDesktop.");
+        return;
+    }
     const realFunc = ApplicationStreamingStore.getStreamerActiveStreamMetadata;
     _defProp(ApplicationStreamingStore, "getStreamerActiveStreamMetadata", {
         value: spoofNative(() => ({ id: applicationId, pid, sourceName: "" }), "getStreamerActiveStreamMetadata"),
@@ -567,7 +601,12 @@ async function completeQuest(quest: Quest) {
         return;
     }
 
-    const secondsNeeded = taskConfig.tasks![taskName]!.target!;
+    const rawTarget = taskConfig.tasks![taskName]?.target;
+    if (rawTarget == null || !Number.isFinite(rawTarget) || rawTarget <= 0) {
+        console.log(`[QuestNotifier] target inválido para ${taskName}; pulando ${quest.config?.messages?.questName}`);
+        return;
+    }
+    const secondsNeeded = rawTarget;
     const secondsDone = quest.config!.configVersion === 1
         ? quest.userStatus!.streamProgressSeconds ?? 0
         : quest.userStatus!.progress?.[taskName]?.value ?? 0;

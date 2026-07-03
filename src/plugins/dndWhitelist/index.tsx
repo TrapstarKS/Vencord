@@ -8,11 +8,12 @@ import type { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
 import { Devs } from "@utils/constants";
+import { Logger } from "@utils/Logger";
 import definePlugin, { OptionType } from "@utils/types";
 import type { Channel, MessageJSON, User } from "@vencord/discord-types";
 import { MessageType } from "@vencord/discord-types/enums";
 import { findByPropsLazy } from "@webpack";
-import { CallStore, ChannelRouter, ChannelStore, GuildMemberStore, GuildStore, Menu, MessageStore, NotificationSettingsStore, PresenceStore, SelectedChannelStore, UserSettingsProtoStore, UserStore } from "@webpack/common";
+import { CallStore, ChannelRouter, ChannelStore, GuildMemberStore, GuildStore, IconUtils, Menu, MessageStore, NotificationSettingsStore, PresenceStore, SelectedChannelStore, StreamerModeStore, UserSettingsProtoStore, UserStore, VoiceStateStore } from "@webpack/common";
 
 type DndWhitelistMessage = MessageJSON & {
     sticker_items?: unknown[];
@@ -47,9 +48,10 @@ const MESSAGE_SOUND = "message1";
 const CALL_SOUND = "call_ringing";
 const CALL_RING_INTERVAL = 5_000;
 
-const SoundModule = findByPropsLazy("playSound") as { playSound(sound: string, volume?: number): void; };
+const SoundModule = findByPropsLazy("playNotificationSound") as { playNotificationSound(sound: string, volume?: number): void; };
 const activeCallRings = new Map<string, ReturnType<typeof setInterval>>();
 const notifiedCallKeys = new Map<string, string>();
+const logger = new Logger("DNDWhitelist");
 
 const settings = definePluginSettings({
     whitelistedUserIds: {
@@ -61,6 +63,16 @@ const settings = definePluginSettings({
         type: OptionType.STRING,
         description: "Comma-separated Group Chat IDs to always notify from (even in DND).",
         default: "",
+    },
+    nativeNotifications: {
+        type: OptionType.SELECT,
+        description: "Native (outside Discord) notifications for this plugin's alerts",
+        options: [
+            { label: "Use Vencord's global setting", value: "default", default: true },
+            { label: "Always", value: "always" },
+            { label: "Only when Discord isn't focused", value: "not-focused" },
+            { label: "Never", value: "never" },
+        ],
     },
 });
 
@@ -165,6 +177,15 @@ function isCurrentUserDnd(currentUserId: string) {
     );
 }
 
+function isStreamerModeActive() {
+    return Boolean(StreamerModeStore?.enabled);
+}
+
+function getNativeNotificationOverride() {
+    const value = settings.store.nativeNotifications;
+    return value === "default" ? undefined : value as "always" | "not-focused" | "never";
+}
+
 function shouldSuppressSelectedChannel(channelId: string) {
     return (
         channelId === SelectedChannelStore.getChannelId() &&
@@ -174,9 +195,16 @@ function shouldSuppressSelectedChannel(channelId: string) {
 }
 
 function playSound(sound: string) {
+    if (typeof SoundModule?.playNotificationSound !== "function") {
+        logger.error(`SoundModule.playNotificationSound not found, resolved module keys: ${SoundModule ? Object.keys(SoundModule).join(", ") : "undefined"}`);
+        return;
+    }
+
     try {
-        SoundModule.playSound(sound);
-    } catch { }
+        SoundModule.playNotificationSound(sound);
+    } catch (e) {
+        logger.error(`Failed to play sound "${sound}"`, e);
+    }
 }
 
 function mentionsCurrentUser(message: DndWhitelistMessage, currentUserId: string, guildId?: string) {
@@ -191,19 +219,39 @@ function mentionsCurrentUser(message: DndWhitelistMessage, currentUserId: string
 
 function shouldNotifyForMessage(message: DndWhitelistMessage) {
     const currentUserId = UserStore.getCurrentUser()?.id;
-    if (!currentUserId || message.author.id === currentUserId) return false;
-    if (message.type === MessageType.CALL) return false;
-    if (!isCurrentUserDnd(currentUserId)) return false;
-    if (shouldSuppressSelectedChannel(message.channel_id)) return false;
+    if (!currentUserId || message.author.id === currentUserId) {
+        logger.debug("shouldNotifyForMessage: skip - missing currentUserId or self-authored");
+        return false;
+    }
+    if (message.type === MessageType.CALL) {
+        logger.debug("shouldNotifyForMessage: skip - message is a call message");
+        return false;
+    }
+    if (isStreamerModeActive()) {
+        logger.debug("shouldNotifyForMessage: skip - streamer mode active");
+        return false;
+    }
+    if (!isCurrentUserDnd(currentUserId)) {
+        logger.debug("shouldNotifyForMessage: skip - user not DND");
+        return false;
+    }
+    if (shouldSuppressSelectedChannel(message.channel_id)) {
+        logger.debug("shouldNotifyForMessage: skip - selected channel suppression");
+        return false;
+    }
 
     const channel = ChannelStore.getChannel(message.channel_id);
     const guildId = message.guild_id ?? channel?.guild_id;
 
+    let result: boolean;
     if (isUserWhitelisted(message.author.id)) {
-        return !guildId || mentionsCurrentUser(message, currentUserId, guildId);
+        result = !guildId || mentionsCurrentUser(message, currentUserId, guildId);
+    } else {
+        result = isGroupChatWhitelisted(channel);
     }
 
-    return isGroupChatWhitelisted(channel);
+    logger.debug(`shouldNotifyForMessage: result=${result}`, { authorId: message.author.id, channelId: message.channel_id });
+    return result;
 }
 
 function getMessageTitle(message: DndWhitelistMessage, channel?: Channel | null) {
@@ -220,26 +268,38 @@ function getMessageTitle(message: DndWhitelistMessage, channel?: Channel | null)
     return authorName;
 }
 
+function getMessageAuthorAvatarUrl(message: DndWhitelistMessage) {
+    const cachedUser = UserStore.getUser(message.author.id);
+    if (cachedUser?.getAvatarURL) return cachedUser.getAvatarURL(undefined, undefined, false);
+
+    const { author } = message;
+    if (author.avatar) {
+        const ext = author.avatar.startsWith("a_") ? "gif" : "png";
+        return `https://cdn.discordapp.com/avatars/${author.id}/${author.avatar}.${ext}?size=128`;
+    }
+
+    return IconUtils.getDefaultAvatarURL(author.id, author.discriminator);
+}
+
 function notifyMessage(message: DndWhitelistMessage) {
     const channel = ChannelStore.getChannel(message.channel_id);
-    const author = UserStore.getUser(message.author.id);
 
     showNotification({
         title: getMessageTitle(message, channel),
         body: getMessageBody(message),
-        icon: author?.getAvatarURL?.() ?? undefined,
+        icon: getMessageAuthorAvatarUrl(message),
         onClick: () => ChannelRouter.transitionToChannel(message.channel_id),
+        useNative: getNativeNotificationOverride(),
     });
 
     playSound(MESSAGE_SOUND);
 }
 
 function scheduleMessageNotification(message: DndWhitelistMessage) {
-    setTimeout(() => {
-        if (!shouldNotifyForMessage(message)) return;
-
-        notifyMessage(message);
-    }, 100);
+    // shouldNotifyForMessage is already checked by the MESSAGE_CREATE handler; the short delay
+    // only gives MessageStore time to populate the body (attachments/stickers/embeds), so we
+    // don't re-check here (re-checking raced with DND/selected-channel changes).
+    setTimeout(() => notifyMessage(message), 100);
 }
 
 function getCallFromEvent(event: DndWhitelistCallEvent) {
@@ -311,6 +371,14 @@ function isCallWhitelisted(call: DndWhitelistCall, channel: Channel) {
     return isUserWhitelisted(callerId) || isGroupChatWhitelisted(channel);
 }
 
+function isCurrentUserAlreadyInCall(channelId: string, currentUserId: string) {
+    try {
+        return VoiceStateStore.getVoiceStateForUser(currentUserId)?.channelId === channelId;
+    } catch {
+        return false;
+    }
+}
+
 function isCallRingingCurrentUser(call: DndWhitelistCall, channelId: string, currentUserId: string) {
     let { ringing } = call;
 
@@ -318,21 +386,50 @@ function isCallRingingCurrentUser(call: DndWhitelistCall, channelId: string, cur
         ringing ??= CallStore.getCall(channelId)?.ringing;
     } catch { }
 
-    return ringing ? ringing.includes(currentUserId) : true;
+    // An empty ringing array means nobody is being rung (e.g. the call ended / was declined),
+    // so only treat a genuinely unknown list (undefined) as "assume it's for us".
+    return ringing == null ? true : ringing.includes(currentUserId);
 }
 
 function shouldNotifyForCall(call: DndWhitelistCall) {
     const currentUserId = UserStore.getCurrentUser()?.id;
     const channelId = getCallChannelId(call);
 
-    if (!currentUserId || !channelId) return false;
-    if (!isCurrentUserDnd(currentUserId)) return false;
-    if (!isCallRingingCurrentUser(call, channelId, currentUserId)) return false;
+    if (!currentUserId || !channelId) {
+        logger.debug("shouldNotifyForCall: skip - missing currentUserId or channelId", { currentUserId, channelId });
+        return false;
+    }
+    if (isStreamerModeActive()) {
+        logger.debug("shouldNotifyForCall: skip - streamer mode active");
+        return false;
+    }
+    if (!isCurrentUserDnd(currentUserId)) {
+        logger.debug("shouldNotifyForCall: skip - user not DND");
+        return false;
+    }
+    if (isCurrentUserAlreadyInCall(channelId, currentUserId)) {
+        logger.debug("shouldNotifyForCall: skip - current user already has a voice state in this channel (they're calling out or already joined)");
+        return false;
+    }
+    if (!isCallRingingCurrentUser(call, channelId, currentUserId)) {
+        logger.debug("shouldNotifyForCall: skip - current user not in ringing list", { ringing: call.ringing });
+        return false;
+    }
 
     const channel = ChannelStore.getChannel(channelId);
-    if (!channel?.isPrivate?.()) return false;
+    if (!channel?.isPrivate?.()) {
+        logger.debug("shouldNotifyForCall: skip - channel not private", { channelId, channelType: channel?.type });
+        return false;
+    }
 
-    return isCallWhitelisted(call, channel);
+    if (getCallCallerId(call, channel) === currentUserId) {
+        logger.debug("shouldNotifyForCall: skip - current user is the caller (outgoing call)");
+        return false;
+    }
+
+    const result = isCallWhitelisted(call, channel);
+    logger.debug(`shouldNotifyForCall: result=${result}`, { callerId: getCallCallerId(call, channel) });
+    return result;
 }
 
 function notifyCall(call: DndWhitelistCall) {
@@ -349,12 +446,22 @@ function notifyCall(call: DndWhitelistCall) {
         ? `${callerName ? `${callerName} is calling in` : "Incoming call in"} ${channelName}`
         : `${callerName ?? channelName} is calling you`;
 
-    showNotification({
+    const baseNotification = {
         title: "Incoming call",
         body,
         icon: getUserAvatarUrl(callerId) ?? (channel.icon ? `https://cdn.discordapp.com/channel-icons/${channel.id}/${channel.icon}.png` : undefined),
         onClick: () => ChannelRouter.transitionToChannel(channelId),
-    });
+        onClose: () => stopCallRing(channelId),
+        permanent: true,
+    };
+
+    // Show both the in-app popup and the native OS toast, regardless of focus/the plugin's
+    // nativeNotifications setting, so dismissing either one (via its X) silences the ring
+    // without having to answer/decline the call itself.
+    showNotification({ ...baseNotification, useNative: "never" });
+    // noPersist on the native toast so the same incoming call isn't logged twice in the
+    // Notification Log (both calls run persistNotification); the in-app one is the canonical entry.
+    showNotification({ ...baseNotification, useNative: "always", noPersist: true });
 }
 
 function stopCallRing(channelId?: string) {
@@ -373,22 +480,38 @@ function handleCallEvent(event: DndWhitelistCallEvent) {
     const call = getCallFromEvent(event);
     const channelId = getCallChannelId(call);
 
-    if (!channelId) return;
+    if (!channelId) {
+        logger.debug("handleCallEvent: skip - no channelId in event", event);
+        return;
+    }
 
     if (!shouldNotifyForCall(call)) {
+        logger.debug(`handleCallEvent: shouldNotifyForCall=false, stopping ring for ${channelId}`);
         stopCallRing(channelId);
         return;
     }
 
     if (!activeCallRings.has(channelId)) {
+        logger.debug(`handleCallEvent: starting ring sound for ${channelId}`);
         playSound(CALL_SOUND);
-        activeCallRings.set(channelId, setInterval(() => playSound(CALL_SOUND), CALL_RING_INTERVAL));
+        activeCallRings.set(channelId, setInterval(() => {
+            const liveCall = CallStore.getCall(channelId);
+            if (!liveCall || !shouldNotifyForCall(liveCall)) {
+                logger.debug(`handleCallEvent: ring tick found call no longer valid for ${channelId}, stopping`);
+                stopCallRing(channelId);
+                return;
+            }
+            playSound(CALL_SOUND);
+        }, CALL_RING_INTERVAL));
     }
 
     const notificationKey = getCallNotificationKey(channelId, call);
     if (notifiedCallKeys.get(channelId) !== notificationKey) {
+        logger.debug(`handleCallEvent: showing notification for ${channelId}, key=${notificationKey}`);
         notifiedCallKeys.set(channelId, notificationKey);
         notifyCall(call);
+    } else {
+        logger.debug(`handleCallEvent: notification already shown for key=${notificationKey}, skipping`);
     }
 }
 
@@ -416,17 +539,25 @@ export default definePlugin({
             scheduleMessageNotification(message);
         },
         CALL_CREATE(event: DndWhitelistCallEvent) {
+            logger.debug("flux CALL_CREATE", event);
             handleCallEvent(event);
         },
         CALL_UPDATE(event: DndWhitelistCallEvent) {
+            logger.debug("flux CALL_UPDATE", event);
             handleCallEvent(event);
         },
         CALL_ENQUEUE_RING(event: DndWhitelistCallEvent) {
+            logger.debug("flux CALL_ENQUEUE_RING", event);
             handleCallEvent(event);
         },
         CALL_DELETE(event: DndWhitelistCallEvent) {
+            logger.debug("flux CALL_DELETE", event);
             stopCallRing(getCallChannelId(getCallFromEvent(event)));
         },
+    },
+
+    start() {
+        logger.info("DNDWhitelist plugin started");
     },
 
     stop: clearCallRings,

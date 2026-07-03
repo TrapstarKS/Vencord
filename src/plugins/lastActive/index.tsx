@@ -9,12 +9,17 @@ import { Devs } from "@utils/constants";
 import definePlugin, { OptionType } from "@utils/types";
 import { User } from "@vencord/discord-types";
 import { findComponentByCodeLazy } from "@webpack";
-import { PresenceStore } from "@webpack/common";
+import { moment, PresenceStore, UserStore, VoiceStateStore } from "@webpack/common";
 
 const Text = findComponentByCodeLazy("data-text-variant", "lineClamp");
 
 const lastActive = new Map<string, number>();
 const previousStatusMap = new Map<string, string>();
+// Timestamp of when a user was last seen active (typing/message/voice) while appearing offline
+const invisibleSince = new Map<string, number>();
+
+// How long a momentary invisible signal (typing/message) keeps counting as "active"
+const INVISIBLE_TTL = 10 * 60_000;
 
 const settings = definePluginSettings({
     showInDms: {
@@ -31,6 +36,30 @@ const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Show last active in friends list",
         default: false
+    },
+    format: {
+        type: OptionType.SELECT,
+        description: "How to display the last active time",
+        options: [
+            { label: "Relative — Active 1h ago", value: "relative", default: true },
+            { label: "Time — Last active: 15:30", value: "time" },
+            { label: "Date + time — Last active: 02/07 15:30", value: "datetime" },
+            { label: "Custom (moment.js format)", value: "custom" }
+        ]
+    },
+    customFormat: {
+        type: OptionType.STRING,
+        description: "moment.js format string used when Format is set to Custom",
+        default: "DD/MM HH:mm"
+    },
+    detectInvisible: {
+        type: OptionType.BOOLEAN,
+        description: "Try to detect users in invisible mode (they appear offline but are active in voice / typing / sending messages)",
+        default: true
+    }
+}, {
+    customFormat: {
+        hidden() { return this.store.format !== "custom"; }
     }
 });
 
@@ -43,6 +72,43 @@ const formatElapsed = (ts: number) => {
     if (s < 86400) return `${(s / 3600) | 0}h`;
     return `${(s / 86400) | 0}d`;
 };
+
+const formatLabel = (ts: number) => {
+    switch (settings.store.format) {
+        case "time":
+            return `Last active: ${moment(ts).format("LT")}`;
+        case "datetime":
+            return `Last active: ${moment(ts).format("DD/MM HH:mm")}`;
+        case "custom":
+            return moment(ts).format(settings.store.customFormat || "DD/MM HH:mm");
+        case "relative":
+        default:
+            return `Active ${formatElapsed(ts)} ago`;
+    }
+};
+
+function markInvisible(userId?: string) {
+    if (!userId || !settings.store.detectInvisible) return;
+    if (userId === UserStore.getCurrentUser()?.id) return;
+    // Discord reports invisible users as "offline"; being active while offline is the tell
+    if (isOnline(PresenceStore.getStatus(userId) ?? "offline")) return;
+    const now = Date.now();
+    invisibleSince.set(userId, now);
+    // Detected activity also refreshes last active, so the elapsed time reflects the real last activity
+    lastActive.set(userId, now);
+}
+
+function isInVoice(userId: string) {
+    return VoiceStateStore.getVoiceStateForUser(userId)?.channelId != null;
+}
+
+function isDetectedInvisible(userId: string) {
+    if (!settings.store.detectInvisible) return false;
+    // Voice is a live, passive signal — always current while they stay in the call
+    if (isInVoice(userId) && !isOnline(PresenceStore.getStatus(userId) ?? "offline")) return true;
+    const t = invisibleSince.get(userId);
+    return t != null && Date.now() - t < INVISIBLE_TTL;
+}
 
 export default definePlugin({
     name: "LastActive",
@@ -84,10 +150,27 @@ export default definePlugin({
 
                 if (prev !== undefined && isOnline(prev) && !isOnline(status))
                     lastActive.set(user.id, Date.now());
-                else if (isOnline(status))
+                else if (isOnline(status)) {
                     lastActive.delete(user.id);
+                    // They became genuinely visible again — drop any invisible flag
+                    invisibleSince.delete(user.id);
+                }
 
                 previousStatusMap.set(user.id, status);
+            }
+        },
+
+        TYPING_START({ userId }: { userId: string; }) {
+            markInvisible(userId);
+        },
+
+        MESSAGE_CREATE({ message }: { message: { author?: { id: string; }; }; }) {
+            markInvisible(message?.author?.id);
+        },
+
+        VOICE_STATE_UPDATES({ voiceStates }: { voiceStates: Array<{ userId: string; channelId?: string | null; }>; }) {
+            for (const { userId, channelId } of voiceStates) {
+                if (channelId) markInvisible(userId);
             }
         }
     },
@@ -103,6 +186,7 @@ export default definePlugin({
     stop() {
         lastActive.clear();
         previousStatusMap.clear();
+        invisibleSince.clear();
     },
 
     render(user: User, status: string, variant?: string, ctx?: "dm" | "server" | "friends") {
@@ -112,14 +196,26 @@ export default definePlugin({
         if (ctx === "server" && !settings.store.showInServers) return null;
         if (ctx === "friends" && !settings.store.showInFriendsList) return null;
 
+        const invisible = isDetectedInvisible(user.id);
         const ts = lastActive.get(user.id);
-        if (!ts) return null;
 
-        const fullDate = new Date(ts).toLocaleString();
+        if (!ts && !invisible) return null;
+
+        let body: string;
+        if (invisible && isInVoice(user.id))
+            body = "active now";
+        else if (ts)
+            body = formatLabel(ts);
+        else
+            body = "recently active";
+
+        const title = invisible
+            ? "Likely invisible — seen active while appearing offline"
+            : (ts ? new Date(ts).toLocaleString() : undefined);
 
         return (
-            <Text variant={variant} color="text-muted" lineClamp={1} title={fullDate}>
-                Active {formatElapsed(ts)} ago
+            <Text variant={variant} color="text-muted" lineClamp={1} title={title}>
+                {invisible ? "🫥 " : ""}{body}
             </Text>
         );
     }

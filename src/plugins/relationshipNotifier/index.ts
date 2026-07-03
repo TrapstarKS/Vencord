@@ -20,6 +20,7 @@ import { Devs } from "@utils/constants";
 import definePlugin from "@utils/types";
 
 import { onChannelDelete, onGuildDelete, onRelationshipRemove, removeFriend, removeGroup, removeGuild } from "./functions";
+import { enqueueStaleFriends, loadFriendGuilds, resetFriendGuildScanState, startHourlyRescan } from "./mutualGuilds";
 import settings from "./settings";
 import { syncAndRunChecks, syncFriends, syncGroups, syncGuilds } from "./utils";
 
@@ -65,13 +66,26 @@ export default definePlugin({
             onRelationshipRemove(e);
             syncFriends();
         },
-        CONNECTION_OPEN: syncAndRunChecks
+        CONNECTION_OPEN() {
+            syncAndRunChecks();
+            enqueueStaleFriends();
+        }
     },
 
     async start() {
         setTimeout(() => {
             syncAndRunChecks();
         }, 5000);
+
+        // loadFriendGuilds() enqueues stale friends itself once the baseline is in memory, so an
+        // earlier CONNECTION_OPEN can't scan against an unloaded map.
+        setTimeout(loadFriendGuilds, 7000);
+
+        startHourlyRescan();
+    },
+
+    stop() {
+        resetFriendGuildScanState();
     },
 
     removeFriend,

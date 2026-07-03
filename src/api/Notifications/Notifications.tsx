@@ -61,6 +61,8 @@ export interface NotificationData {
     noPersist?: boolean;
     /** Whether this notification should be dismissed when clicked (defaults to true) */
     dismissOnClick?: boolean;
+    /** Override the global native-notification setting just for this notification */
+    useNative?: "always" | "never" | "not-focused";
 }
 
 function _showNotification(notification: NotificationData, id: number) {
@@ -76,10 +78,10 @@ function _showNotification(notification: NotificationData, id: number) {
     });
 }
 
-function shouldBeNative() {
+function shouldBeNative(useNativeOverride?: NotificationData["useNative"]) {
     if (typeof Notification === "undefined") return false;
 
-    const { useNative } = Settings.notifications;
+    const useNative = useNativeOverride ?? Settings.notifications.useNative;
     if (useNative === "always") return true;
     if (useNative === "not-focused") return !document.hasFocus();
     return false;
@@ -92,14 +94,32 @@ export async function requestPermission() {
     );
 }
 
+// Native OS notifications (e.g. Windows toasts) unreliably fetch remote http(s) icon URLs
+// themselves, so the icon silently fails to show. Fetching it ourselves and passing a data URI
+// sidesteps that entirely.
+async function toDataUrl(url: string): Promise<string | undefined> {
+    try {
+        const blob = await fetch(url).then(r => r.blob());
+        return await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(blob);
+        });
+    } catch {
+        return undefined;
+    }
+}
+
 export async function showNotification(data: NotificationData) {
     persistNotification(data);
 
-    if (shouldBeNative() && await requestPermission()) {
-        const { title, body, icon, image, onClick = null, onClose = null } = data;
+    if (shouldBeNative(data.useNative) && await requestPermission()) {
+        const { title, body, icon, image, onClick = null, onClose = null, permanent } = data;
         const n = new Notification(title, {
             body,
-            icon,
+            icon: icon && (await toDataUrl(icon)) || icon,
+            requireInteraction: permanent,
             // @ts-expect-error ts is drunk
             image
         });

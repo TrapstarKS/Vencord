@@ -216,15 +216,36 @@ function getLiveCallMs(userId: string) {
     return startedAt == null ? 0 : Date.now() - startedAt;
 }
 
-function getFriendScore(userId: string, affinityMap = UserAffinitiesStore.getUserAffinitiesMap?.() ?? new Map<string, any>(), dmRecencyRanks = getDmRecencyRanks()) {
-    const stats = statsByUser.get(userId);
+function hasRealInteraction(userId: string, stats = statsByUser.get(userId)) {
+    const messageCount = stats?.messageCount ?? 0;
+    const callMs = (stats?.callMs ?? 0) + getLiveCallMs(userId);
+    return messageCount > 0 || callMs > 0;
+}
+
+function getPrimaryInteractionScore(userId: string, stats = statsByUser.get(userId)) {
     const messageCount = stats?.messageCount ?? 0;
     const callMs = (stats?.callMs ?? 0) + getLiveCallMs(userId);
     const callScore = (callMs / 3600000) * (settings.store.callHourWeight ?? 500);
+
+    return messageCount + callScore;
+}
+
+// Affinity/recency are only meant to break near-ties between friends with
+// otherwise-equal real interaction, never to outweigh a real message/call
+// difference or let a no-interaction user into the list at all.
+const TIEBREAKER_SCALE = 1e-6;
+
+function getFriendScore(userId: string, affinityMap = UserAffinitiesStore.getUserAffinitiesMap?.() ?? new Map<string, any>(), dmRecencyRanks = getDmRecencyRanks()) {
+    const stats = statsByUser.get(userId);
+    if (!hasRealInteraction(userId, stats)) return 0;
+
+    const primaryScore = getPrimaryInteractionScore(userId, stats);
     const recencyRank = dmRecencyRanks.get(userId);
     const recencyTieBreaker = recencyRank == null ? 0 : 1 / (recencyRank + 1);
+    const tieBreaker = getAffinityTieBreaker(userId, affinityMap) + recencyTieBreaker;
+    const safeTieBreaker = Number.isFinite(tieBreaker) ? tieBreaker : 0;
 
-    return messageCount + callScore + getAffinityTieBreaker(userId, affinityMap) + recencyTieBreaker;
+    return primaryScore + safeTieBreaker * TIEBREAKER_SCALE;
 }
 
 function queueStatsRefresh() {
@@ -280,11 +301,15 @@ async function processNextScan() {
         if (channelId == null) return;
 
         const messageCount = await fetchMessageCount(channelId);
-        const oldStats = statsByUser.get(userId);
+        // On failure (network error / search rate-limit) leave the old stats and lastScannedAt
+        // untouched so this friend is retried on the next stale sweep, instead of being marked
+        // scanned with a stale/zero count that then sticks for `rescanHours`.
+        if (messageCount == null) return;
 
+        const oldStats = statsByUser.get(userId);
         setStats(userId, {
             channelId,
-            messageCount: messageCount ?? oldStats?.messageCount ?? 0,
+            messageCount,
             callMs: oldStats?.callMs ?? 0,
             lastScannedAt: Date.now()
         });
@@ -374,7 +399,9 @@ function bumpMessageCount(channelId: string) {
 
 function getFrequentFriendIds() {
     loadStats();
-    queueStatsRefresh();
+    // queueStatsRefresh() is intentionally NOT called here: this runs from isFrequentFriend/wrapSort
+    // during the friends-list render, and scheduling work there mutates module state mid-render.
+    // Refreshes are driven by the CONNECTION_OPEN / CHANNEL_CREATE flux handlers and start() instead.
 
     const limit = settings.store.limit ?? 10;
     const cacheKey = [
@@ -392,11 +419,11 @@ function getFrequentFriendIds() {
     const affinityMap = UserAffinitiesStore.getUserAffinitiesMap?.() ?? new Map<string, any>();
     const dmRecencyRanks = getDmRecencyRanks();
     const scoredFriends = RelationshipStore.getFriendIDs()
+        .filter(userId => hasRealInteraction(userId))
         .map(userId => ({
             userId,
             score: getFriendScore(userId, affinityMap, dmRecencyRanks)
         }))
-        .filter(friend => friend.score > 0)
         .sort((a, b) => b.score - a.score)
         .slice(0, limit);
 
@@ -464,7 +491,8 @@ export default definePlugin({
         VOICE_STATE_UPDATES() {
             syncActiveVoiceSessions();
         },
-        MESSAGE_CREATE({ message }) {
+        MESSAGE_CREATE({ message, optimistic }) {
+            if (optimistic) return;
             if (message?.channel_id != null) bumpMessageCount(message.channel_id);
         }
     },

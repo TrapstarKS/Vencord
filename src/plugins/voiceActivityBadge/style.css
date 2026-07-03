@@ -1,0 +1,110 @@
+.vc-vab-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--interactive-normal);
+    vertical-align: middle;
+    cursor: pointer;
+    transition: filter .1s ease;
+}
+
+.vc-vab-badge:hover {
+    filter: brightness(1.3);
+}
+
+.vc-vab-list {
+    margin-right: 4px;
+}
+
+.vc-vab-profile {
+    padding: 2px 4px;
+}
+
+.vc-vab-muted,
+.vc-vab-deaf {
+    color: var(--status-danger, #f23f43);
+}
+
+.vc-vab-stream {
+    color: var(--text-brand, #b58bff);
+}
+
+.vc-vab-video {
+    color: var(--green-360, #23a55a);
+}
+
+.vc-vab-active {
+    color: var(--green-360, #23a55a);
+    animation: vc-vab-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes vc-vab-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+}
+
+/* Styled to match UserVoiceShow's tooltip: compact, dark, "In Voice Chat" + channel + avatar stack. */
+.vc-vab-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-width: 50vw;
+    padding: 8px 12px;
+
+    /* --background-floating was removed in recent Discord builds; use the surface tokens. */
+    background: var(--background-surface-high, var(--modal-background, #111214));
+    border-radius: 5px;
+    box-shadow: var(--shadow-high, 0 8px 16px rgb(0 0 0 / 24%));
+    color: var(--text-normal);
+}
+
+.vc-vab-card-channel {
+    width: fit-content;
+    max-width: 100%;
+    cursor: pointer;
+}
+
+/* Let the row own the click (single = go, double = join) instead of the channel mention chip. */
+.vc-vab-card-channel * {
+    pointer-events: none;
+}
+
+.vc-vab-card-members {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.vc-vab-card-members > svg {
+    flex-shrink: 0;
+    color: var(--interactive-icon-default, var(--text-muted));
+}
+
+.vc-vab-card-avatars {
+    display: flex;
+}
+
+.vc-vab-card-avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    object-fit: cover;
+    cursor: pointer;
+    border: 2px solid var(--background-surface-high, #111214);
+    transition: transform .1s ease;
+}
+
+.vc-vab-card-avatar:not(:first-child) {
+    margin-left: -8px;
+}
+
+.vc-vab-card-avatar:hover {
+    transform: scale(1.12);
+    z-index: 1;
+}
+
+.vc-vab-card-more {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+}

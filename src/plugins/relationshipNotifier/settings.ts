@@ -49,5 +49,20 @@ export default definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Notify when removed from a group chat",
         default: true
+    },
+    friendServerChanges: {
+        type: OptionType.BOOLEAN,
+        description: "Notify when a friend leaves a server you have in common, or joins a server you're both in",
+        default: true
+    },
+    friendServerScanHours: {
+        type: OptionType.SLIDER,
+        description: "How often to check friends' mutual servers for changes",
+        markers: [1, 6, 12, 24, 72],
+        default: 12,
+        stickToMarkers: true,
+        disabled() {
+            return !this.store.friendServerChanges;
+        }
     }
 });

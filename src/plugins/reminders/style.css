@@ -1,0 +1,44 @@
+.vc-rem-modal {
+    padding: 8px 0;
+}
+
+.vc-rem-empty {
+    color: var(--text-muted);
+    padding: 16px 0;
+    text-align: center;
+}
+
+.vc-rem-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.vc-rem-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--background-secondary);
+}
+
+.vc-rem-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex-grow: 1;
+    min-width: 0;
+}
+
+.vc-rem-text {
+    font-weight: 600;
+    color: var(--header-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.vc-rem-due {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
