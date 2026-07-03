@@ -18,6 +18,8 @@ on:
             - src/**
             - browser/**
             - scripts/build/**
+            - scripts/installFork.ps1
+            - scripts/installFork.bat
             - package.json
             - pnpm-lock.yaml
             - .github/workflows/publish-devbuild.yml
@@ -67,7 +69,8 @@ jobs:
                           --target main
                   fi
 
-                  # sobe os arquivos prontos (Discord desktop + Vesktop), sobrescrevendo
+                  # sobe os arquivos prontos (Discord desktop + Vesktop) e os
+                  # instaladores pros amigos, sobrescrevendo
                   gh release upload devbuild --clobber \
                       dist/patcher.js \
                       dist/preload.js \
@@ -76,7 +79,9 @@ jobs:
                       dist/vencordDesktopMain.js \
                       dist/vencordDesktopPreload.js \
                       dist/vencordDesktopRenderer.js \
-                      dist/vencordDesktopRenderer.css
+                      dist/vencordDesktopRenderer.css \
+                      scripts/installFork.bat \
+                      scripts/installFork.ps1
 
                   # o titulo PRECISA terminar com o hash - e o que o updater compara
                   gh release edit devbuild \
