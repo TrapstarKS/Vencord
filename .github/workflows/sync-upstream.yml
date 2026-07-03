@@ -1,0 +1,60 @@
+name: Sync upstream Vencord
+
+# Mantém a sua main sincronizada com Vendicated:main, preservando as suas
+# modificações. Merge limpo -> vai direto pra main. Deu conflito -> abre um PR
+# pra você resolver na mão (nada é sobrescrito à força na main).
+
+on:
+    schedule:
+        - cron: "0 6 * * *" # todo dia ~06:00 UTC (~03:00 BRT)
+    workflow_dispatch: {} # botão "Run workflow" manual na aba Actions
+
+permissions:
+    contents: write
+    pull-requests: write
+
+jobs:
+    sync:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout do fork
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Configurar identidade do git
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            - name: Adicionar upstream e buscar
+              run: |
+                  git remote add upstream https://github.com/Vendicated/Vencord.git
+                  git fetch upstream main
+
+            - name: Tentar merge de upstream/main
+              id: merge
+              run: |
+                  if git merge --no-edit upstream/main; then
+                      echo "status=clean" >> "$GITHUB_OUTPUT"
+                  else
+                      git merge --abort
+                      echo "status=conflict" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Push do merge (sem conflitos)
+              if: steps.merge.outputs.status == 'clean'
+              run: git push origin main
+
+            - name: Abrir PR pra resolver na mão (conflitos)
+              if: steps.merge.outputs.status == 'conflict'
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  git push -f origin upstream/main:refs/heads/sync/upstream
+                  gh pr create \
+                      --base main \
+                      --head sync/upstream \
+                      --title "Sync upstream Vencord (conflitos - resolver manualmente)" \
+                      --body "O merge automático de \`Vendicated:main\` conflitou com as suas modificações. Resolva os conflitos por aqui e faça merge." \
+                      || echo "PR já existe; a branch sync/upstream foi atualizada."
