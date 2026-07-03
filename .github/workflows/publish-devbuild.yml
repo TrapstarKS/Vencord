@@ -1,0 +1,84 @@
+name: Publish DevBuild (fork)
+
+# Compila um build STANDALONE e publica os arquivos JA PRONTOS no release
+# "devbuild" do seu fork, com o hash do commit no titulo (ex.: "DevBuild 05d746e8").
+#
+# Assim qualquer instalacao STANDALONE do seu fork se auto-atualiza baixando esses
+# arquivos pelo updater interno do Vencord - ninguem precisa rodar `pnpm build`.
+#
+# Dispara:
+#  - quando VOCE empurra codigo pra main (seus proprios commits)
+#  - depois que o "Sync upstream Vencord" roda (merge do oficial no seu fork)
+#  - manualmente (aba Actions -> Run workflow)
+
+on:
+    push:
+        branches: [main]
+        paths:
+            - src/**
+            - browser/**
+            - scripts/build/**
+            - package.json
+            - pnpm-lock.yaml
+            - .github/workflows/publish-devbuild.yml
+    workflow_run:
+        workflows: ["Sync upstream Vencord"]
+        types: [completed]
+    workflow_dispatch: {}
+
+permissions:
+    contents: write
+
+jobs:
+    Publish:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
+
+            - uses: pnpm/action-setup@v6 # usa a versao do packageManager no package.json
+
+            - name: Use Node.js 24
+              uses: actions/setup-node@v6
+              with:
+                  node-version: 24
+                  cache: "pnpm"
+
+            - name: Instalar dependencias
+              run: pnpm install --frozen-lockfile
+
+            - name: Build standalone
+              run: pnpm build --standalone
+
+            - name: Hash curto do commit
+              id: vars
+              run: echo "hash=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+            - name: Publicar release "devbuild"
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  # cria o release "devbuild" na primeira vez
+                  if ! gh release view devbuild >/dev/null 2>&1; then
+                      gh release create devbuild \
+                          --title "DevBuild ${{ steps.vars.outputs.hash }}" \
+                          --notes "Build automatico do fork. Instalacoes standalone se atualizam por aqui." \
+                          --target main
+                  fi
+
+                  # sobe os arquivos prontos (Discord desktop + Vesktop), sobrescrevendo
+                  gh release upload devbuild --clobber \
+                      dist/patcher.js \
+                      dist/preload.js \
+                      dist/renderer.js \
+                      dist/renderer.css \
+                      dist/vencordDesktopMain.js \
+                      dist/vencordDesktopPreload.js \
+                      dist/vencordDesktopRenderer.js \
+                      dist/vencordDesktopRenderer.css
+
+                  # o titulo PRECISA terminar com o hash - e o que o updater compara
+                  gh release edit devbuild \
+                      --title "DevBuild ${{ steps.vars.outputs.hash }}" \
+                      --latest
