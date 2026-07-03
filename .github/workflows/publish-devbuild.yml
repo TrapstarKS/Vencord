@@ -20,6 +20,8 @@ on:
             - scripts/build/**
             - scripts/installFork.ps1
             - scripts/installFork.bat
+            - scripts/installFork.sh
+            - scripts/installFork.command
             - package.json
             - pnpm-lock.yaml
             - .github/workflows/publish-devbuild.yml
@@ -81,7 +83,9 @@ jobs:
                       dist/vencordDesktopRenderer.js \
                       dist/vencordDesktopRenderer.css \
                       scripts/installFork.bat \
-                      scripts/installFork.ps1
+                      scripts/installFork.ps1 \
+                      scripts/installFork.sh \
+                      scripts/installFork.command
 
                   # o titulo PRECISA terminar com o hash - e o que o updater compara
                   gh release edit devbuild \
