@@ -41,10 +41,10 @@ const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         // Discord's own NowPlayingViewStore intermittently misses friends' voice calls (limited guild scan + throttling),
         // even though VoiceStateStore has the data. We re-derive missing calls from VoiceStateStore so they always show.
-        // Off by default: the synthetic card built below doesn't fully match the shape Discord's own
-        // card renderer expects, and can crash it (Cannot read properties of null (reading 'id') in
-        // VoiceSection) right after login, before NowPlayingViewStore has caught up.
-        description: "Reliably show friends' voice calls (fixes Discord sometimes not detecting them) — experimental, can cause a crash on login",
+        // Previously this crashed VoiceSection (null `.id` read) because it also synthesized cards for group DM
+        // calls, which have no guild, and set guildContext to null unconditionally — see buildMissingCallCards.
+        // Now restricted to guild voice channels with a resolvable guild, so that never happens.
+        description: "Reliably show friends' voice calls (fixes Discord sometimes not detecting them)",
         default: false,
         restartNeeded: true
     }
@@ -64,8 +64,13 @@ function memberIds(party: any): string[] {
 // Keep the card if at least one of its members is an actual friend.
 const isFriendCard = (card: any) => memberIds(card?.party).some(id => RelationshipStore.isFriend(id));
 
-// Channel types that belong in Active Now: guild voice (2) and group DM (3). Private 1:1 DM calls (1) are your own.
-const VOICE_CHANNEL_TYPES = new Set([2, 3]);
+// Only guild voice channels (2). Discord's own gap is specifically a "limited guild scan" (see comment
+// on the setting above), so that's the only case worth re-deriving. Group DM calls (3) were included here
+// before, but a group DM channel has no guild by definition — every synthetic card for one carried
+// `guildContext: null`, and Discord's real Active Now card renderer expects `guildContext` to always be a
+// real guild for a rendered voice row. That's the null `.id` read that crashed VoiceSection, and it wasn't
+// a rare race: it fired on every group DM call, deterministically.
+const VOICE_CHANNEL_TYPES = new Set([2]);
 
 /**
  * Re-derive friends' voice calls straight from VoiceStateStore and return card objects for any the given
@@ -98,8 +103,15 @@ function buildMissingCallCards(existingCards: any[]): any[] {
             const members = [...memberIdSet].map(uid => UserStore.getUser(uid)).filter(Boolean);
             if (!members.length) continue;
 
-            const guildId = channel.getGuildId?.() ?? null;
+            // Prefer the raw `guild_id` field over the `getGuildId()` method: early in boot (right after
+            // CONNECTION_OPEN, before stores fully hydrate) ChannelStore can hand back a channel record whose
+            // prototype methods aren't wired up yet, silently making `getGuildId?.()` resolve to undefined
+            // even for a real guild channel. `guild_id` is a plain data property and survives that.
+            const guildId = channel.guild_id ?? channel.getGuildId?.() ?? null;
             const guild = guildId ? GuildStore.getGuild(guildId) : null;
+            // No guild resolved for a guild voice channel (store not hydrated yet, or bad data) — skip
+            // rather than emit a card with a null guildContext, which is exactly what crashed VoiceSection.
+            if (!guild) continue;
 
             out.push({
                 type: "user",
