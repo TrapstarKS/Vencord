@@ -64,7 +64,7 @@ export interface KnownAccountToken {
 
 export interface AddTokenResult {
     ok: boolean;
-    reason?: "empty" | "invalid" | "expired" | "already-active";
+    reason?: "empty" | "invalid" | "expired" | "already-active" | "timeout";
     username?: string;
 }
 
@@ -440,6 +440,21 @@ export async function restoreHiddenAccounts(maxAccounts: number): Promise<Restor
     return r;
 }
 
+function sleep(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function waitForActiveUser(id: string, timeoutMs = 15000): Promise<boolean> {
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+        if ((UserStore as any).getCurrentUser?.()?.id === id) return true;
+        await sleep(200);
+    }
+
+    return false;
+}
+
 export async function addAccountByToken(rawToken: string): Promise<AddTokenResult> {
     const token = rawToken.trim();
     if (!token) return { ok: false, reason: "empty" };
@@ -458,6 +473,15 @@ export async function addAccountByToken(rawToken: string): Promise<AddTokenResul
     }
 
     await (AuthActions as any).switchAccountToken(token);
+
+    // The switch reconnects the gateway under the hood; calling switchAccountToken again before
+    // this settles can silently fail or throw, so batch adds must wait for it to land before
+    // moving on to the next token.
+    const switched = await waitForActiveUser(user.id);
+    if (!switched) {
+        logger.warn(`switchAccountToken for ${user.id} did not settle in time`);
+        return { ok: false, reason: "timeout" };
+    }
 
     await loadSavedAccounts();
     const saved = saveableAccount(toMultiAccountUser(user.id, user, TOKEN_STATUS_VALID));
@@ -498,21 +522,31 @@ export async function addAccountsFromInput(raw: string): Promise<AddTokensResult
     }
 
     for (const token of tokens) {
-        const r = await addAccountByToken(token);
+        try {
+            const r = await addAccountByToken(token);
 
-        if (r.ok) {
-            result.added++;
-            result.messages.push(`Added ${r.username}.`);
-            continue;
+            if (r.ok) {
+                result.added++;
+                result.messages.push(`Added ${r.username}.`);
+                // Give the freshly-switched session a moment to finish settling before we hit
+                // switchAccountToken again for the next one; back-to-back calls can otherwise fail.
+                await sleep(750);
+                continue;
+            }
+
+            result.failed++;
+            result.messages.push(
+                r.reason === "expired" ? "A token was expired." :
+                    r.reason === "already-active" ? "Already logged in as one of those accounts." :
+                        r.reason === "empty" ? "Skipped an empty token." :
+                            r.reason === "timeout" ? "A switch didn't finish in time." :
+                                "A token was invalid."
+            );
+        } catch (e) {
+            logger.error("failed to add account from batch", e);
+            result.failed++;
+            result.messages.push("A token failed unexpectedly, check the console.");
         }
-
-        result.failed++;
-        result.messages.push(
-            r.reason === "expired" ? "A token was expired." :
-                r.reason === "already-active" ? "Already logged in as one of those accounts." :
-                    r.reason === "empty" ? "Skipped an empty token." :
-                        "A token was invalid."
-        );
     }
 
     return result;
