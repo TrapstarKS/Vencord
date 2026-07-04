@@ -19,6 +19,7 @@ const TOKEN_STATUS_VALID = 2;
 
 const Tokens = findByPropsLazy("getToken", "setToken", "encryptAndStoreTokens");
 const MultiAccountStore = findStoreLazy("MultiAccountStore");
+const AuthActions = findByPropsLazy("switchAccountToken", "logout");
 
 interface KvStorage {
     get(key: string): unknown;
@@ -53,6 +54,18 @@ export interface RestoreResult {
     skippedNoToken: number;
     skippedLimit: number;
     skippedMismatch: number;
+}
+
+export interface KnownAccountToken {
+    id: string;
+    username: string;
+    token: string;
+}
+
+export interface AddTokenResult {
+    ok: boolean;
+    reason?: "empty" | "invalid" | "expired" | "already-active";
+    username?: string;
 }
 
 type SavedAccounts = Record<string, SavedAccount>;
@@ -234,6 +247,39 @@ async function checkToken(id: string, token: string): Promise<TokenCheck> {
     return rest;
 }
 
+async function identifyToken(token: string): Promise<TokenCheck> {
+    try {
+        const res: any = await (RestAPI as any).get({
+            url: "/users/@me",
+            headers: { authorization: token }
+        });
+
+        const user = res?.body;
+        if (isSnowflake(user?.id)) return { state: "valid", user };
+
+        return { state: "unknown" };
+    } catch (e) {
+        if (isAuthFailureStatus(getErrorStatus(e))) return { state: "expired" };
+
+        try {
+            const res = await fetch(`${location.origin}/api/v9/users/@me`, {
+                headers: { authorization: token },
+                credentials: "omit"
+            });
+
+            if (isAuthFailureStatus(res.status)) return { state: "expired" };
+            if (!res.ok) return { state: "unknown", error: e };
+
+            const user = await res.json().catch(() => null);
+            if (isSnowflake(user?.id)) return { state: "valid", user };
+
+            return { state: "unknown" };
+        } catch (e2) {
+            return { state: "unknown", error: e2 };
+        }
+    }
+}
+
 async function persistSavedAccounts() {
     await DataStore.set(DATA_KEY, savedAccounts);
 }
@@ -385,4 +431,50 @@ export async function restoreHiddenAccounts(maxAccounts: number): Promise<Restor
     } catch { }
 
     return r;
+}
+
+export async function addAccountByToken(rawToken: string): Promise<AddTokenResult> {
+    const token = rawToken.trim();
+    if (!token) return { ok: false, reason: "empty" };
+
+    const check = await identifyToken(token);
+    if (check.state === "expired") return { ok: false, reason: "expired" };
+    if (check.state !== "valid") return { ok: false, reason: "invalid" };
+
+    const { user } = check;
+    if (user.id === (UserStore as any).getCurrentUser?.()?.id) {
+        return { ok: false, reason: "already-active" };
+    }
+
+    if (!AuthActions || typeof (AuthActions as any).switchAccountToken !== "function") {
+        return { ok: false, reason: "invalid" };
+    }
+
+    await (AuthActions as any).switchAccountToken(token);
+
+    await loadSavedAccounts();
+    const saved = saveableAccount(toMultiAccountUser(user.id, user, TOKEN_STATUS_VALID));
+    if (saved) savedAccounts[user.id] = saved;
+    await persistSavedAccounts();
+
+    return { ok: true, username: saved?.username ?? user.username };
+}
+
+export function getKnownAccountTokens(): KnownAccountToken[] {
+    const out: KnownAccountToken[] = [];
+
+    for (const user of getSwitcherUsers()) {
+        if (!isSnowflake(user?.id)) continue;
+
+        const token = getStoredToken(user.id);
+        if (!token) continue;
+
+        out.push({
+            id: user.id,
+            username: user.username ?? user.globalName ?? `Account ${user.id}`,
+            token
+        });
+    }
+
+    return out;
 }

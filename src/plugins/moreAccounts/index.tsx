@@ -6,11 +6,12 @@
 
 import { definePluginSettings } from "@api/Settings";
 import { Flex } from "@components/Flex";
+import { copyToClipboard } from "@utils/clipboard";
 import { Devs } from "@utils/constants";
 import definePlugin, { OptionType } from "@utils/types";
-import { Button, Forms, React, Toasts, useState } from "@webpack/common";
+import { Button, Forms, React, TextInput, Toasts, useState } from "@webpack/common";
 
-import { getRestoreStats, loadSavedAccounts, restoreHiddenAccounts, saveCurrentAccounts, storageReady } from "./accounts";
+import { addAccountByToken, getKnownAccountTokens, getRestoreStats, loadSavedAccounts, restoreHiddenAccounts, saveCurrentAccounts, storageReady } from "./accounts";
 
 let autoRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 let autoRestoreAttempts = 0;
@@ -100,6 +101,101 @@ function RestoreSection() {
     );
 }
 
+function TokenToolsSection() {
+    const [token, setToken] = useState("");
+    const [busy, setBusy] = useState(false);
+    const [message, setMessage] = useState<string | null>(null);
+    const [accounts, setAccounts] = useState(() => getKnownAccountTokens());
+
+    function refreshAccounts() {
+        setAccounts(getKnownAccountTokens());
+    }
+
+    async function addByToken() {
+        setBusy(true);
+        setMessage(null);
+
+        try {
+            const r = await addAccountByToken(token);
+
+            if (r.ok) {
+                setMessage(`Switched to ${r.username}. It's now saved in your account list.`);
+                setToken("");
+                refreshAccounts();
+            } else if (r.reason === "empty") {
+                setMessage("Paste a token first.");
+            } else if (r.reason === "expired") {
+                setMessage("That token is expired.");
+            } else if (r.reason === "already-active") {
+                setMessage("You're already logged in as that account.");
+            } else {
+                setMessage("That doesn't look like a valid token.");
+            }
+        } catch {
+            setMessage("Failed to add that account, check the console.");
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    async function copyOne(name: string, tok: string) {
+        await copyToClipboard(tok);
+        setMessage(`Copied ${name}'s token to clipboard.`);
+    }
+
+    async function copyAll() {
+        const map: Record<string, string> = {};
+        for (const a of accounts) map[a.username] = a.token;
+
+        await copyToClipboard(JSON.stringify(map, null, 2));
+        setMessage(`Copied ${accounts.length} token${accounts.length === 1 ? "" : "s"} to clipboard.`);
+    }
+
+    return (
+        <section>
+            <Forms.FormTitle>Add account by token</Forms.FormTitle>
+            <Forms.FormText style={{ marginBottom: 8 }}>
+                Paste a token to log in and add that account to the switcher, no password needed. This switches your active session to it, the same as logging in through Discord's own login screen.
+            </Forms.FormText>
+            <Flex>
+                <TextInput
+                    type="password"
+                    value={token}
+                    onChange={setToken}
+                    placeholder="Paste token here"
+                    disabled={busy}
+                />
+                <Button onClick={addByToken} disabled={busy || !token.trim()}>
+                    {busy ? "Working..." : "Add"}
+                </Button>
+            </Flex>
+
+            <div style={{ margin: "16px 0", borderTop: "1px solid var(--background-modifier-accent)" }} />
+
+            <Forms.FormTitle>Copy account tokens</Forms.FormTitle>
+            <Forms.FormText style={{ marginBottom: 8 }}>
+                Treat these like passwords, anyone with one has full access to that account. Use this to quickly log the same accounts into another Discord client.
+            </Forms.FormText>
+            {accounts.length === 0 && <Forms.FormText>No accounts with a known token yet.</Forms.FormText>}
+            {accounts.map(a => (
+                <Flex key={a.id} style={{ marginBottom: 4, alignItems: "center", justifyContent: "space-between" }}>
+                    <Forms.FormText>{a.username}</Forms.FormText>
+                    <Button size={Button.Sizes.SMALL} onClick={() => copyOne(a.username, a.token)}>
+                        Copy token
+                    </Button>
+                </Flex>
+            ))}
+            {accounts.length > 0 && (
+                <Button style={{ marginTop: 8 }} color={Button.Colors.TRANSPARENT} onClick={copyAll}>
+                    Copy all as JSON
+                </Button>
+            )}
+
+            {message && <Forms.FormText style={{ marginTop: 8 }}>{message}</Forms.FormText>}
+        </section>
+    );
+}
+
 const settings = definePluginSettings({
     maxAccounts: {
         type: OptionType.NUMBER,
@@ -115,6 +211,11 @@ const settings = definePluginSettings({
         type: OptionType.COMPONENT,
         description: "Restore hidden accounts",
         component: RestoreSection
+    },
+    tokenTools: {
+        type: OptionType.COMPONENT,
+        description: "Add accounts by token and copy tokens",
+        component: TokenToolsSection
     }
 });
 
