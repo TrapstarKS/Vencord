@@ -31,13 +31,6 @@ export default definePlugin({
                 match: /this\.idleTimeout\.(start|stop)/g,
                 replace: "$self.noop"
             }
-        },
-        {
-            find: "handleIdleUpdate(){",
-            replacement: {
-                match: "handleIdleUpdate(){",
-                replace: "handleIdleUpdate(){return;"
-            }
         }
     ],
 
