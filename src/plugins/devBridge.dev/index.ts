@@ -146,7 +146,9 @@ async function loop() {
             continue;
         }
 
-        if (!cmd || cmd.nonce == null || typeof cmd.code !== "string") continue; // long-poll timeout, loop again
+        // Long-poll timeout, loop again. The small sleep caps this at ~20 req/s in case a
+        // misbehaving server answers instantly with an empty 200 (would busy-loop otherwise).
+        if (!cmd || cmd.nonce == null || typeof cmd.code !== "string") { await sleep(50); continue; }
 
         if (settings.store.logCommands) logger.info("cmd", cmd.nonce, "\n", cmd.code);
 

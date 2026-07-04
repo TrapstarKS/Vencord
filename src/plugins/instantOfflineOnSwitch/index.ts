@@ -171,7 +171,9 @@ export default definePlugin({
 
     start() {
         installWebSocketHook();
-        hookAuthActions();
+        // Don't hookAuthActions() here — webpack isn't fully loaded yet at this stage, so the
+        // lookup always fails once (logging a scary but harmless console error). CONNECTION_OPEN
+        // fires once the gateway connects and webpack is ready, so it's the only attempt needed.
     },
 
     stop() {

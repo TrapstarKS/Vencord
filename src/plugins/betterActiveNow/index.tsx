@@ -41,8 +41,11 @@ const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         // Discord's own NowPlayingViewStore intermittently misses friends' voice calls (limited guild scan + throttling),
         // even though VoiceStateStore has the data. We re-derive missing calls from VoiceStateStore so they always show.
-        description: "Reliably show friends' voice calls (fixes Discord sometimes not detecting them)",
-        default: true,
+        // Off by default: the synthetic card built below doesn't fully match the shape Discord's own
+        // card renderer expects, and can crash it (Cannot read properties of null (reading 'id') in
+        // VoiceSection) right after login, before NowPlayingViewStore has caught up.
+        description: "Reliably show friends' voice calls (fixes Discord sometimes not detecting them) — experimental, can cause a crash on login",
+        default: false,
         restartNeeded: true
     }
 });

@@ -41,6 +41,23 @@ require.main!.filename = join(asarPath, discordPkg.main);
 app.setAppPath(asarPath);
 
 if (!IS_VANILLA) {
+    // When two Discord clients run at once (e.g. stable + Canary), the loser of the race
+    // for the RPC port range throws an uncaught EADDRINUSE in the main process. Discord's
+    // bootstrap has its own uncaughtException handler that shows the crash screen and
+    // relaunches, so a plain process.on() listener wouldn't stop the loop — we have to
+    // intercept the emit so their handler never sees this specific error.
+    const originalEmit = process.emit;
+    process.emit = function (event: string, ...args: any[]) {
+        if (event === "uncaughtException") {
+            const err = args[0] as any;
+            if (err?.code === "EADDRINUSE" && err.port >= 6463 && err.port <= 6472) {
+                console.warn(`[Vencord] Ignoring RPC port conflict on ${err.port} (another Discord instance is running)`);
+                return true;
+            }
+        }
+        return originalEmit.apply(process, arguments as any);
+    } as any;
+
     const settings = RendererSettings.store;
     // Repatch after host updates on Windows
     if (process.platform === "win32") {
