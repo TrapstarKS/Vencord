@@ -11,7 +11,7 @@ import { Devs } from "@utils/constants";
 import definePlugin, { OptionType } from "@utils/types";
 import { Button, Forms, React, TextInput, Toasts, useState } from "@webpack/common";
 
-import { addAccountByToken, getKnownAccountTokens, getRestoreStats, loadSavedAccounts, restoreHiddenAccounts, saveCurrentAccounts, storageReady } from "./accounts";
+import { addAccountsFromInput, getKnownAccountTokens, getRestoreStats, loadSavedAccounts, restoreHiddenAccounts, saveCurrentAccounts, storageReady } from "./accounts";
 
 let autoRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 let autoRestoreAttempts = 0;
@@ -116,20 +116,17 @@ function TokenToolsSection() {
         setMessage(null);
 
         try {
-            const r = await addAccountByToken(token);
+            const r = await addAccountsFromInput(token);
 
-            if (r.ok) {
-                setMessage(`Switched to ${r.username}. It's now saved in your account list.`);
+            setMessage(
+                r.total > 1
+                    ? `${r.added}/${r.total} account(s) added. ${r.messages.join(" ")}`
+                    : r.messages.join(" ")
+            );
+
+            if (r.added > 0) {
                 setToken("");
                 refreshAccounts();
-            } else if (r.reason === "empty") {
-                setMessage("Paste a token first.");
-            } else if (r.reason === "expired") {
-                setMessage("That token is expired.");
-            } else if (r.reason === "already-active") {
-                setMessage("You're already logged in as that account.");
-            } else {
-                setMessage("That doesn't look like a valid token.");
             }
         } catch {
             setMessage("Failed to add that account, check the console.");
@@ -147,7 +144,7 @@ function TokenToolsSection() {
         const map: Record<string, string> = {};
         for (const a of accounts) map[a.username] = a.token;
 
-        await copyToClipboard(JSON.stringify(map, null, 2));
+        await copyToClipboard(JSON.stringify(map));
         setMessage(`Copied ${accounts.length} token${accounts.length === 1 ? "" : "s"} to clipboard.`);
     }
 
@@ -155,14 +152,14 @@ function TokenToolsSection() {
         <section>
             <Forms.FormTitle>Add account by token</Forms.FormTitle>
             <Forms.FormText style={{ marginBottom: 8 }}>
-                Paste a token to log in and add that account to the switcher, no password needed. This switches your active session to it, the same as logging in through Discord's own login screen.
+                Paste a single token, or the JSON from "Copy all as JSON" below to add several accounts at once, no password needed. Each one switches your active session to it, the same as logging in through Discord's own login screen, ending on the last one added.
             </Forms.FormText>
             <Flex>
                 <TextInput
                     type="password"
                     value={token}
                     onChange={setToken}
-                    placeholder="Paste token here"
+                    placeholder="Paste a token or JSON here"
                     disabled={busy}
                 />
                 <Button onClick={addByToken} disabled={busy || !token.trim()}>

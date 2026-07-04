@@ -68,6 +68,13 @@ export interface AddTokenResult {
     username?: string;
 }
 
+export interface AddTokensResult {
+    total: number;
+    added: number;
+    failed: number;
+    messages: string[];
+}
+
 type SavedAccounts = Record<string, SavedAccount>;
 
 type TokenCheck =
@@ -458,6 +465,57 @@ export async function addAccountByToken(rawToken: string): Promise<AddTokenResul
     await persistSavedAccounts();
 
     return { ok: true, username: saved?.username ?? user.username };
+}
+
+function extractTokensFromInput(raw: string): string[] {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+
+    if (trimmed[0] !== "{" && trimmed[0] !== "[" && trimmed[0] !== '"') return [trimmed];
+
+    try {
+        const parsed = JSON.parse(trimmed);
+
+        if (typeof parsed === "string") return [parsed];
+        if (Array.isArray(parsed)) return parsed.filter((v): v is string => typeof v === "string" && v.length > 0);
+        if (parsed && typeof parsed === "object") {
+            return Object.values(parsed).filter((v): v is string => typeof v === "string" && v.length > 0);
+        }
+
+        return [];
+    } catch {
+        return [trimmed];
+    }
+}
+
+export async function addAccountsFromInput(raw: string): Promise<AddTokensResult> {
+    const tokens = extractTokensFromInput(raw);
+    const result: AddTokensResult = { total: tokens.length, added: 0, failed: 0, messages: [] };
+
+    if (!tokens.length) {
+        result.messages.push("Paste a token, or the JSON from \"Copy all as JSON\".");
+        return result;
+    }
+
+    for (const token of tokens) {
+        const r = await addAccountByToken(token);
+
+        if (r.ok) {
+            result.added++;
+            result.messages.push(`Added ${r.username}.`);
+            continue;
+        }
+
+        result.failed++;
+        result.messages.push(
+            r.reason === "expired" ? "A token was expired." :
+                r.reason === "already-active" ? "Already logged in as one of those accounts." :
+                    r.reason === "empty" ? "Skipped an empty token." :
+                        "A token was invalid."
+        );
+    }
+
+    return result;
 }
 
 export function getKnownAccountTokens(): KnownAccountToken[] {
