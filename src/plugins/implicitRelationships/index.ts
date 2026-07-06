@@ -126,9 +126,10 @@ export default definePlugin({
         // Implicit relationships are defined as users that you:
         // 1. Have an affinity for
         // 2. Do not have a relationship with
+        // 3. Aren't a bot
         const userAffinities: Record<string, any>[] = UserAffinitiesStore.getUserAffinities();
         const relationships = RelationshipStore.getMutableRelationships();
-        const nonFriendAffinities = userAffinities.filter(a => !RelationshipStore.getRelationshipType(a.otherUserId));
+        const nonFriendAffinities = userAffinities.filter(a => !RelationshipStore.getRelationshipType(a.otherUserId) && !UserStore.getUser(a.otherUserId)?.bot);
         nonFriendAffinities.forEach(a => {
             relationships.set(a.otherUserId, 5);
         });
@@ -149,10 +150,14 @@ export default definePlugin({
                 if (chunkCount === 0) return;
 
                 count -= chunkCount;
-                RelationshipStore.emitChange();
                 if (count <= 0) {
                     FluxDispatcher.unsubscribe("GUILD_MEMBERS_CHUNK_BATCH", callback);
+                    // Some of these were only just fetched, so we couldn't know they were bots until now.
+                    for (const [id, type] of relationships) {
+                        if (type === 5 && UserStore.getUser(id)?.bot) relationships.delete(id);
+                    }
                 }
+                RelationshipStore.emitChange();
             } catch (e) {
                 new Logger("ImplicitRelationships").error("Error in GUILD_MEMBERS_CHUNK_BATCH handler", e);
             }
