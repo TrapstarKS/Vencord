@@ -11,15 +11,56 @@ import { localStorage } from "@utils/localStorage";
 import definePlugin, { OptionType } from "@utils/types";
 import { FluxStore } from "@vencord/discord-types";
 import { find, findStoreLazy } from "@webpack";
-import { FluxDispatcher, RestAPI } from "@webpack/common";
+import { Button, FluxDispatcher, Forms, React, RestAPI, useState } from "@webpack/common";
 
 const STORAGE_KEY = "vc-questNotifier-seen-v1";
+
+function ForceCheckSection() {
+    const [busy, setBusy] = useState(false);
+    const [message, setMessage] = useState<string | null>(null);
+
+    async function run() {
+        setBusy(true);
+        setMessage(null);
+        try {
+            const result = await runImmediateCheck();
+            if (!result) {
+                setMessage("QuestNotifier ainda não iniciou (QuestsStore não resolvida ainda).");
+                return;
+            }
+            setMessage(`Concluído: ${result.enrolled} matrícula(s) nova(s), ${result.queued} quest(s) adicionada(s) à fila.`);
+        } catch (e) {
+            setMessage("Falhou, veja o console.");
+            console.log("[QuestNotifier] Immediate check failed:", e);
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    return (
+        <section>
+            <Forms.FormTitle>Verificar agora</Forms.FormTitle>
+            <Forms.FormText style={{ marginBottom: 8 }}>
+                Pula a espera do intervalo configurado: checa, matricula e enfileira as quests elegíveis na hora.
+            </Forms.FormText>
+            <Button onClick={run} disabled={busy}>
+                {busy ? "Verificando..." : "Verificar e matricular agora"}
+            </Button>
+            {message && <Forms.FormText style={{ marginTop: 8 }}>{message}</Forms.FormText>}
+        </section>
+    );
+}
 
 const settings = definePluginSettings({
     enrollCheckIntervalHours: {
         type: OptionType.NUMBER,
         description: "De quantas em quantas horas checar e se matricular automaticamente em quests novas",
         default: 1
+    },
+    forceCheck: {
+        type: OptionType.COMPONENT,
+        description: "Pular o delay e verificar/matricular quests agora",
+        component: ForceCheckSection
     },
     watchVideo: {
         type: OptionType.BOOLEAN,
@@ -418,6 +459,38 @@ async function watchNewQuestsLoop() {
         await sleep(delayMs);
     }
     console.log("[QuestNotifier] watchNewQuestsLoop stopped.");
+}
+
+// One-shot version of watchNewQuestsLoop's scan, without the human-pacing delays between
+// enrolls or the wait for the next interval. Used by the "check now" settings button so the
+// user can force an immediate pass instead of waiting for the periodic loop above.
+async function runImmediateCheck() {
+    if (!QuestsStore) return null;
+    console.log("[QuestNotifier] runImmediateCheck: manual check triggered.");
+
+    const all = [...QuestsStore.quests.values()].filter(q =>
+        !q.userStatus?.completedAt &&
+        !isExpired(q) &&
+        isSupported(q)
+    );
+
+    const unenrolled = all.filter(shouldEnroll);
+    let enrolled = 0;
+    for (const q of unenrolled) {
+        if (stopCompletions) break;
+        try {
+            if (await enrollQuest(q)) enrolled++;
+        } catch (e) {
+            console.log(`[QuestNotifier] runImmediateCheck: enroll failed for ${q.config?.messages?.questName}:`, e);
+        }
+    }
+
+    const eligible = all.filter(isEligibleForCompletion);
+    const queued = eligible.filter(q => !processedIds.has(q.id)).length;
+    enqueueEligible(eligible);
+
+    console.log(`[QuestNotifier] runImmediateCheck: done (${enrolled} enrolled, ${queued} queued).`);
+    return { enrolled, queued };
 }
 
 // ------------ Quest completion handlers ------------

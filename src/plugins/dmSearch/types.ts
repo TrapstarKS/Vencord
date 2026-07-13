@@ -62,6 +62,10 @@ interface EmbedMedia {
 
 export interface MessageEmbed {
     type?: string;
+    url?: string;
+    title?: string;
+    description?: string;
+    provider?: { name?: string; url?: string; };
     thumbnail?: EmbedMedia;
     image?: EmbedMedia;
     video?: EmbedMedia;

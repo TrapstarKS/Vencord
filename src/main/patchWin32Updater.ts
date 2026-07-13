@@ -17,7 +17,7 @@
 */
 
 import { app } from "electron";
-import { existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync } from "original-fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "original-fs";
 import { basename, dirname, join } from "path";
 
 function isNewer($new: string, old: string) {
@@ -29,6 +29,19 @@ function isNewer($new: string, old: string) {
         if (newParts[i] < oldParts[i]) return false;
     }
     return false;
+}
+
+function isVencordBootstrap(file: string) {
+    try {
+        // Installer-generated app.asar files are tiny archives whose payload contains the
+        // absolute path to a Vencord patcher. Never treat one as Discord's original app.asar.
+        const stat = statSync(file);
+        if (!stat.isFile() || stat.size > 64 * 1024) return false;
+
+        return readFileSync(file).includes(Buffer.from("patcher.js"));
+    } catch {
+        return false;
+    }
 }
 
 function patchLatest() {
@@ -52,6 +65,15 @@ function patchLatest() {
         const _app = join(resources, "_app.asar");
 
         if (!existsSync(app) || statSync(app).isDirectory()) return;
+
+        // Another Vencord build may already own this host version. This commonly happens when
+        // a dev build is injected while an older/global Vencord instance is still running: its
+        // before-quit auto-patcher sees the freshly-patched app.asar and would otherwise wrap it
+        // a second time, losing the real Discord backup and crashing on duplicate IPC handlers.
+        if (existsSync(_app) || isVencordBootstrap(app)) {
+            console.warn("[Vencord] Host update is already patched by another Vencord instance; skipping nested auto-patch");
+            return;
+        }
 
         console.info("[Vencord] Detected Host Update. Repatching...");
 

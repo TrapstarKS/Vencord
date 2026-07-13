@@ -1,0 +1,180 @@
+.vc-sessionGuard {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.vc-sessionGuard-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.vc-sessionGuard-status {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.vc-sessionGuard-statusLine {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.vc-sessionGuard-error {
+    color: var(--text-danger, #f23f43);
+    font-size: 12px;
+}
+
+.vc-sessionGuard-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.vc-sessionGuard-panel {
+    padding: 12px;
+    border: 1px solid var(--background-modifier-accent);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--background-secondary) 70%, transparent);
+}
+
+.vc-sessionGuard-panelTitle {
+    margin-bottom: 8px !important;
+}
+
+.vc-sessionGuard-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 280px;
+    overflow: auto;
+}
+
+.vc-sessionGuard-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--background-modifier-accent);
+    border-radius: 10px;
+    background: var(--background-secondary-alt);
+}
+
+.vc-sessionGuard-rowInfo {
+    flex: 1;
+    min-width: 0;
+}
+
+.vc-sessionGuard-rowName {
+    color: var(--header-primary);
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vc-sessionGuard-rowMeta {
+    color: var(--text-muted);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vc-sessionGuard-badges {
+    display: flex;
+    flex: none;
+    gap: 4px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.vc-sessionGuard-badge {
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.vc-sessionGuard-badgeTrusted {
+    color: var(--white-500, #fff);
+    background: var(--status-positive, #23a55a);
+}
+
+.vc-sessionGuard-badgeNew {
+    color: var(--white-500, #fff);
+    background: var(--status-danger, #f23f43);
+}
+
+.vc-sessionGuard-rowActions {
+    display: flex;
+    flex: none;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.vc-sessionGuard-empty {
+    color: var(--text-muted);
+    font-size: 13px;
+    padding: 8px 0;
+}
+
+.vc-sessionGuard-event {
+    display: grid;
+    grid-template-columns: 72px 1fr;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--background-modifier-accent);
+    font-size: 12px;
+}
+
+.vc-sessionGuard-event:last-child {
+    border-bottom: none;
+}
+
+.vc-sessionGuard-eventTime {
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.vc-sessionGuard-eventBody {
+    min-width: 0;
+    color: var(--text-normal);
+}
+
+.vc-sessionGuard-eventLabel {
+    font-weight: 600;
+}
+
+.vc-sessionGuard-eventDetail {
+    color: var(--text-muted);
+}
+
+.vc-sessionGuard-eventType-new .vc-sessionGuard-eventLabel {
+    color: var(--status-danger, #f23f43);
+}
+
+.vc-sessionGuard-eventType-logout .vc-sessionGuard-eventLabel {
+    color: var(--status-warning, #f0b232);
+}
+
+.vc-sessionGuard-eventType-baseline .vc-sessionGuard-eventLabel,
+.vc-sessionGuard-eventType-trusted .vc-sessionGuard-eventLabel {
+    color: var(--status-positive, #23a55a);
+}
+
+.vc-sessionGuard-warn {
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--status-warning, #f0b232) 40%, transparent);
+    background: color-mix(in srgb, var(--status-warning, #f0b232) 12%, transparent);
+    color: var(--text-normal);
+    font-size: 13px;
+}

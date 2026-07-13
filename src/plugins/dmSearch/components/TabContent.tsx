@@ -11,6 +11,7 @@ import { ChannelMeta, MessageHit, SearchCursor, SearchTab } from "@plugins/dmSea
 import { useEffect, useRef, useState } from "@webpack/common";
 
 import { HitRow } from "./HitRow";
+import { MediaGrid } from "./MediaGrid";
 
 const SCROLL_SAVE_MS = 150;
 
@@ -94,18 +95,23 @@ export function TabContent({ tab, query, hits, cursor, loading, channels, on_mor
 
     return (
         <div ref={scroller} className="vc-dms-content">
-            <div className="vc-dms-list">
-                {hits.map(hit => (
-                    <HitRow
-                        key={hit.id}
-                        hit={hit}
-                        query={query}
-                        tab={tab}
-                        channel_meta={channels.get(hit.channel_id)}
-                        on_keep_open={on_keep_open}
-                    />
-                ))}
-            </div>
+            {tab === "media"
+                ? <MediaGrid hits={hits} channels={channels} on_keep_open={on_keep_open} />
+                : (
+                    <div className="vc-dms-list">
+                        {hits.map(hit => (
+                            <HitRow
+                                key={hit.id}
+                                hit={hit}
+                                query={query}
+                                tab={tab}
+                                channel_meta={channels.get(hit.channel_id)}
+                                on_keep_open={on_keep_open}
+                            />
+                        ))}
+                    </div>
+                )
+            }
             {paging
                 ? (
                     <div className="vc-dms-loading">

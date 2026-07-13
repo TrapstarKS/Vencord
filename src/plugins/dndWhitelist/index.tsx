@@ -6,14 +6,21 @@
 
 import type { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import { showNotification } from "@api/Notifications";
-import { definePluginSettings } from "@api/Settings";
 import { Devs } from "@utils/constants";
 import { Logger } from "@utils/Logger";
-import definePlugin, { OptionType } from "@utils/types";
+import definePlugin from "@utils/types";
 import type { Channel, MessageJSON, User } from "@vencord/discord-types";
 import { MessageType } from "@vencord/discord-types/enums";
 import { findByPropsLazy } from "@webpack";
 import { CallStore, ChannelRouter, ChannelStore, GuildMemberStore, GuildStore, IconUtils, Menu, MessageStore, NotificationSettingsStore, PresenceStore, SelectedChannelStore, StreamerModeStore, UserSettingsProtoStore, UserStore, VoiceStateStore } from "@webpack/common";
+
+import {
+    getGroupChatWhitelist,
+    getUserWhitelist,
+    isInQuietHours,
+    settings,
+    toggleIdInSetting
+} from "./settings";
 
 type DndWhitelistMessage = MessageJSON & {
     sticker_items?: unknown[];
@@ -53,60 +60,12 @@ const activeCallRings = new Map<string, ReturnType<typeof setInterval>>();
 const notifiedCallKeys = new Map<string, string>();
 const logger = new Logger("DNDWhitelist");
 
-const settings = definePluginSettings({
-    whitelistedUserIds: {
-        type: OptionType.STRING,
-        description: "Comma-separated User IDs to always notify (even in DND).",
-        default: "",
-    },
-    whitelistedGroupChatIds: {
-        type: OptionType.STRING,
-        description: "Comma-separated Group Chat IDs to always notify from (even in DND).",
-        default: "",
-    },
-    nativeNotifications: {
-        type: OptionType.SELECT,
-        description: "Native (outside Discord) notifications for this plugin's alerts",
-        options: [
-            { label: "Use Vencord's global setting", value: "default", default: true },
-            { label: "Always", value: "always" },
-            { label: "Only when Discord isn't focused", value: "not-focused" },
-            { label: "Never", value: "never" },
-        ],
-    },
-});
-
-function getWhitelist(setting: string): string[] {
-    return setting
-        .split(",")
-        .map(id => id.trim())
-        .filter(Boolean);
-}
-
-function getUserWhitelist(): string[] {
-    return getWhitelist(settings.store.whitelistedUserIds);
-}
-
-function getGroupChatWhitelist(): string[] {
-    return getWhitelist(settings.store.whitelistedGroupChatIds);
-}
-
 function isUserWhitelisted(userId?: string | null) {
     return Boolean(userId && getUserWhitelist().includes(userId));
 }
 
 function isGroupChatWhitelisted(channel?: Channel | null) {
     return Boolean(channel?.isGroupDM?.() && getGroupChatWhitelist().includes(channel.id));
-}
-
-function toggleIdInSetting(settingKey: "whitelistedUserIds" | "whitelistedGroupChatIds", id: string) {
-    const list = getWhitelist(settings.store[settingKey]);
-    const index = list.indexOf(id);
-
-    if (index === -1) list.push(id);
-    else list.splice(index, 1);
-
-    settings.store[settingKey] = list.join(",");
 }
 
 const userContextMenuPatch: NavContextMenuPatchCallback = (children, { user }: { user?: User; }) => {
@@ -223,6 +182,10 @@ function shouldNotifyForMessage(message: DndWhitelistMessage) {
         logger.debug("shouldNotifyForMessage: skip - missing currentUserId or self-authored");
         return false;
     }
+    if (!settings.store.notifyMessages) {
+        logger.debug("shouldNotifyForMessage: skip - message notifications disabled");
+        return false;
+    }
     if (message.type === MessageType.CALL) {
         logger.debug("shouldNotifyForMessage: skip - message is a call message");
         return false;
@@ -233,6 +196,10 @@ function shouldNotifyForMessage(message: DndWhitelistMessage) {
     }
     if (!isCurrentUserDnd(currentUserId)) {
         logger.debug("shouldNotifyForMessage: skip - user not DND");
+        return false;
+    }
+    if (isInQuietHours()) {
+        logger.debug("shouldNotifyForMessage: skip - quiet hours");
         return false;
     }
     if (shouldSuppressSelectedChannel(message.channel_id)) {
@@ -399,12 +366,20 @@ function shouldNotifyForCall(call: DndWhitelistCall) {
         logger.debug("shouldNotifyForCall: skip - missing currentUserId or channelId", { currentUserId, channelId });
         return false;
     }
+    if (!settings.store.notifyCalls) {
+        logger.debug("shouldNotifyForCall: skip - call notifications disabled");
+        return false;
+    }
     if (isStreamerModeActive()) {
         logger.debug("shouldNotifyForCall: skip - streamer mode active");
         return false;
     }
     if (!isCurrentUserDnd(currentUserId)) {
         logger.debug("shouldNotifyForCall: skip - user not DND");
+        return false;
+    }
+    if (isInQuietHours()) {
+        logger.debug("shouldNotifyForCall: skip - quiet hours");
         return false;
     }
     if (isCurrentUserAlreadyInCall(channelId, currentUserId)) {

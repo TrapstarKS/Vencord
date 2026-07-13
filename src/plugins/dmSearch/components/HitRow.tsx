@@ -4,14 +4,14 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { close_switcher, jump_to } from "@plugins/dmSearch/api/navigation";
-import { settings } from "@plugins/dmSearch/settings";
-import { ChannelMeta, MessageHit, SearchTab } from "@plugins/dmSearch/types";
+import { ChannelMeta, MessageEmbed, MessageHit, SearchTab } from "@plugins/dmSearch/types";
 import { avatar_url } from "@plugins/dmSearch/utils/avatar";
 import { channel_info } from "@plugins/dmSearch/utils/channel";
-import { fmt_bytes, fmt_time } from "@plugins/dmSearch/utils/format";
+import { fmt_bytes, fmt_time, fmt_time_full, hostname } from "@plugins/dmSearch/utils/format";
 import { highlight } from "@plugins/dmSearch/utils/highlight";
-import { ChannelStore, UserStore } from "@webpack/common";
+import { media_thumbs } from "@plugins/dmSearch/utils/media";
+import { open_hit } from "@plugins/dmSearch/utils/open";
+import { UserStore } from "@webpack/common";
 
 interface Props {
     hit: MessageHit;
@@ -22,21 +22,11 @@ interface Props {
 }
 
 export function HitRow({ hit, query, tab, channel_meta, on_keep_open }: Props) {
-    const channel = ChannelStore.getChannel(hit.channel_id);
     const me = UserStore.getCurrentUser?.();
     const is_self = !!me && hit.author?.id === me.id;
     const info = channel_info(hit.channel_id, channel_meta);
     const author = hit.author?.global_name || hit.author?.username || "Unknown";
     const is_bot = !!hit.author?.bot;
-
-    const open = () => {
-        if (settings.store.keepOpenAfterJump) {
-            on_keep_open();
-        } else {
-            close_switcher();
-        }
-        void jump_to(hit.channel_id, hit.id, channel?.guild_id, channel_meta);
-    };
 
     return (
         <div
@@ -48,7 +38,7 @@ export function HitRow({ hit, query, tab, channel_meta, on_keep_open }: Props) {
             onClick={e => {
                 e.preventDefault();
                 e.stopPropagation();
-                open();
+                open_hit(hit, channel_meta, on_keep_open);
             }}
         >
             <img
@@ -67,7 +57,7 @@ export function HitRow({ hit, query, tab, channel_meta, on_keep_open }: Props) {
                     {info.kind === "server" && <span className="vc-dms-context">{info.target}</span>}
                     {info.kind === "server" && info.server && <span className="vc-dms-context-muted">{info.server}</span>}
                     {is_bot && <span className="vc-dms-bot-tag">BOT</span>}
-                    <span className="vc-dms-time">{fmt_time(hit.timestamp)}</span>
+                    <span className="vc-dms-time" title={fmt_time_full(hit.timestamp)}>{fmt_time(hit.timestamp)}</span>
                 </div>
                 <Body hit={hit} query={query} tab={tab} />
             </div>
@@ -79,38 +69,14 @@ function Body({ hit, query, tab }: { hit: MessageHit; query: string; tab: Search
     if (tab === "media") return <MediaBody hit={hit} />;
     if (tab === "files") return <FilesBody hit={hit} query={query} />;
     if (tab === "links") return <LinksBody hit={hit} query={query} />;
-    return <TextBody content={hit.content} query={query} />;
+    return <TextBody content={hit.content} query={query} clamped={tab !== "pins"} />;
 }
 
-function TextBody({ content, query }: { content: string; query: string; }) {
+function TextBody({ content, query, clamped = true }: { content: string; query: string; clamped?: boolean; }) {
     if (!content) {
         return <div className="vc-dms-text"><span className="vc-dms-muted">[no text]</span></div>;
     }
-    return <div className="vc-dms-text">{highlight(content, query)}</div>;
-}
-
-interface Thumb {
-    key: string;
-    src: string;
-    video: boolean;
-}
-
-const MEDIA_EMBED_TYPES = new Set(["image", "gifv", "video"]);
-
-function media_thumbs(hit: MessageHit): Thumb[] {
-    const out: Thumb[] = [];
-    for (const a of hit.attachments ?? []) {
-        if (a.content_type?.startsWith?.("image/")) out.push({ key: a.id, src: a.proxy_url, video: false });
-        else if (a.content_type?.startsWith?.("video/")) out.push({ key: a.id, src: a.proxy_url, video: true });
-    }
-    // Media hits are often link-based (Tenor GIFs, image links, YouTube) and carry no attachment —
-    // only an embed with a preview image. Fall back to the embed thumbnail so they aren't blank.
-    (hit.embeds ?? []).forEach((e, i) => {
-        if (!MEDIA_EMBED_TYPES.has(e.type ?? "")) return;
-        const src = e.image?.proxy_url ?? e.thumbnail?.proxy_url;
-        if (src) out.push({ key: `e${i}`, src, video: false });
-    });
-    return out;
+    return <div className={"vc-dms-text" + (clamped ? "" : " vc-dms-text-full")}>{highlight(content, query)}</div>;
 }
 
 function MediaBody({ hit }: { hit: MessageHit; }) {
@@ -150,11 +116,42 @@ function FilesBody({ hit, query }: { hit: MessageHit; query: string; }) {
 }
 
 function LinksBody({ hit, query }: { hit: MessageHit; query: string; }) {
-    const urls = (hit.content ?? "").match(/https?:\/\/[^\s<>"]+/g) ?? [];
+    const embeds = (hit.embeds ?? []).filter(e => e.url);
+
+    if (!embeds.length) {
+        const urls = (hit.content ?? "").match(/https?:\/\/[^\s<>"]+/g) ?? [];
+        return (
+            <div className="vc-dms-links">
+                {urls.slice(0, 5).map((u, i) => <span key={i} className="vc-dms-link">{u}</span>)}
+                {hit.content && <TextBody content={hit.content} query={query} />}
+            </div>
+        );
+    }
+
+    // Most link hits are just a bare URL as the whole message — the card below already
+    // shows it, so repeating it as plain text underneath would be pure noise.
+    const content_is_bare_link = /^https?:\/\/\S+$/.test((hit.content ?? "").trim());
+
     return (
         <div className="vc-dms-links">
-            {urls.slice(0, 5).map((u, i) => <span key={i} className="vc-dms-link">{u}</span>)}
-            {hit.content && <TextBody content={hit.content} query={query} />}
+            {embeds.slice(0, 3).map((e, i) => <LinkCard key={i} embed={e} />)}
+            {hit.content && !content_is_bare_link && <TextBody content={hit.content} query={query} />}
+        </div>
+    );
+}
+
+function LinkCard({ embed }: { embed: MessageEmbed; }) {
+    const thumb = embed.thumbnail?.proxy_url ?? embed.image?.proxy_url;
+    const title = embed.title || embed.url;
+    const site = embed.provider?.name || hostname(embed.url);
+
+    return (
+        <div className="vc-dms-link-card">
+            {thumb && <img className="vc-dms-link-thumb" src={thumb} alt="" loading="lazy" />}
+            <div className="vc-dms-link-info">
+                <span className="vc-dms-link-title">{title}</span>
+                {site && <span className="vc-dms-link-site">{site}</span>}
+            </div>
         </div>
     );
 }
