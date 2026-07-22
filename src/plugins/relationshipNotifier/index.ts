@@ -22,7 +22,18 @@ import definePlugin from "@utils/types";
 import { onChannelDelete, onGuildDelete, onRelationshipRemove, removeFriend, removeGroup, removeGuild } from "./functions";
 import { enqueueStaleFriends, loadFriendGuilds, resetFriendGuildScanState, startHourlyRescan } from "./mutualGuilds";
 import settings from "./settings";
-import { syncAndRunChecks, syncFriends, syncGroups, syncGuilds } from "./utils";
+import { clearState, syncAndRunChecks, syncFriends, syncGroups, syncGuilds } from "./utils";
+
+interface LogoutEvent {
+    type: "LOGOUT";
+    isSwitchingAccount: boolean;
+}
+
+// Grace period start() already waits before its first check, so GuildStore/ChannelStore/
+// RelationshipStore have time to hydrate for the newly active account.
+const ACCOUNT_SWITCH_GRACE_MS = 5000;
+
+let isSwitchingAccount = false;
 
 export default definePlugin({
     name: "RelationshipNotifier",
@@ -66,7 +77,27 @@ export default definePlugin({
             onRelationshipRemove(e);
             syncFriends();
         },
+        LOGOUT(e: LogoutEvent) {
+            isSwitchingAccount = e.isSwitchingAccount;
+        },
+
         CONNECTION_OPEN() {
+            if (isSwitchingAccount) {
+                isSwitchingAccount = false;
+
+                // The new account's stores aren't hydrated yet at this point (see the
+                // loadFriendGuilds() comment in mutualGuilds.ts) — clear the in-memory state now so
+                // getGuild()/getGroup() can't hand back the previous account's data in the meantime,
+                // then wait out the same grace period start() uses before diffing/notifying.
+                clearState();
+                setTimeout(() => {
+                    syncAndRunChecks();
+                    resetFriendGuildScanState();
+                    loadFriendGuilds();
+                }, ACCOUNT_SWITCH_GRACE_MS);
+                return;
+            }
+
             syncAndRunChecks();
             enqueueStaleFriends();
         }

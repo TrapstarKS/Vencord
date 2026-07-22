@@ -22,6 +22,11 @@ import {
 
 const logger = new Logger("SessionGuard");
 
+interface LogoutEvent {
+    type: "LOGOUT";
+    isSwitchingAccount: boolean;
+}
+
 const settings = definePluginSettings({
     dashboard: {
         type: OptionType.COMPONENT,
@@ -112,6 +117,7 @@ function syncSettingsAccess() {
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let focusHandler: (() => void) | null = null;
+let isSwitchingAccount = false;
 
 const settingsListeners: Array<[path: string, cb: () => void]> = [
     ["plugins.SessionGuard.enabledPolling", () => { syncSettingsAccess(); schedulePoll(); }],
@@ -259,7 +265,17 @@ export default definePlugin({
     ],
 
     flux: {
+        LOGOUT(e: LogoutEvent) {
+            isSwitchingAccount = e.isSwitchingAccount;
+        },
+
         CONNECTION_OPEN() {
+            // UserStore can still report the previous account here when this reconnect is an
+            // account switch (the token/gateway swap over to the new account before UserStore's
+            // flux state catches up) — loading/checking now would read and persist under the
+            // wrong user's key. Let CURRENT_USER_UPDATE (below) do the reload once it's accurate.
+            if (isSwitchingAccount) return;
+
             if (!settings.store.checkOnConnect) return;
             void loadSessionGuardState()
                 .then(() => checkSessions())
@@ -267,6 +283,7 @@ export default definePlugin({
         },
         // Multi-account: reload state for the new user and baseline if needed.
         CURRENT_USER_UPDATE() {
+            isSwitchingAccount = false;
             void loadSessionGuardState()
                 .then(() => {
                     if (settings.store.checkOnConnect) return checkSessions();

@@ -6,6 +6,7 @@
 
 import { definePluginSettings } from "@api/Settings";
 import { Devs } from "@utils/constants";
+import { useTimer } from "@utils/react";
 import definePlugin, { OptionType } from "@utils/types";
 import { User } from "@vencord/discord-types";
 import { findComponentByCodeLazy } from "@webpack";
@@ -110,6 +111,35 @@ function isDetectedInvisible(userId: string) {
     return t != null && Date.now() - t < INVISIBLE_TTL;
 }
 
+function LastActiveText({ user, variant }: { user: User; variant?: string; }) {
+    // Forces a re-render every tick so the elapsed time keeps advancing on its own, instead of only
+    // updating when the host row happens to re-render for an unrelated reason (e.g. hover).
+    useTimer({ interval: 30_000 });
+
+    const invisible = isDetectedInvisible(user.id);
+    const ts = lastActive.get(user.id);
+
+    if (!ts && !invisible) return null;
+
+    let body: string;
+    if (invisible && isInVoice(user.id))
+        body = "active now";
+    else if (ts)
+        body = formatLabel(ts);
+    else
+        body = "recently active";
+
+    const title = invisible
+        ? "Likely invisible — seen active while appearing offline"
+        : (ts ? new Date(ts).toLocaleString() : undefined);
+
+    return (
+        <Text variant={variant} color="text-muted" lineClamp={1} title={title}>
+            {invisible ? "🫥 " : ""}{body}
+        </Text>
+    );
+}
+
 export default definePlugin({
     name: "LastActive",
     description: "Shows how long ago users were last active",
@@ -196,27 +226,6 @@ export default definePlugin({
         if (ctx === "server" && !settings.store.showInServers) return null;
         if (ctx === "friends" && !settings.store.showInFriendsList) return null;
 
-        const invisible = isDetectedInvisible(user.id);
-        const ts = lastActive.get(user.id);
-
-        if (!ts && !invisible) return null;
-
-        let body: string;
-        if (invisible && isInVoice(user.id))
-            body = "active now";
-        else if (ts)
-            body = formatLabel(ts);
-        else
-            body = "recently active";
-
-        const title = invisible
-            ? "Likely invisible — seen active while appearing offline"
-            : (ts ? new Date(ts).toLocaleString() : undefined);
-
-        return (
-            <Text variant={variant} color="text-muted" lineClamp={1} title={title}>
-                {invisible ? "🫥 " : ""}{body}
-            </Text>
-        );
+        return <LastActiveText user={user} variant={variant} />;
     }
 });

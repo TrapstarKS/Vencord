@@ -32,6 +32,26 @@ import { Session, SessionInfo } from "./types";
 import { cl, fetchNamesFromDataStore, getDefaultName, GetOsColor, GetPlatformIcon, savedSessionsCache, saveSessionsToDataStore } from "./utils";
 
 const AuthSessionsStore = findStoreLazy("AuthSessionsStore");
+
+async function checkNewSessions() {
+    const data = await RestAPI.get({
+        url: Constants.Endpoints.AUTH_SESSIONS
+    });
+
+    for (const session of data.body.user_sessions) {
+        if (savedSessionsCache.has(session.id_hash)) continue;
+
+        savedSessionsCache.set(session.id_hash, { name: "", isNew: true });
+        showNotification({
+            title: "BetterSessions",
+            body: `New session:\n${session.client_info.os} · ${session.client_info.platform} · ${session.client_info.location}`,
+            permanent: true,
+            onClick: () => SettingsRouter.openUserSettings("sessions_panel")
+        });
+    }
+
+    saveSessionsToDataStore();
+}
 const TimestampClasses = findCssClassesLazy("timestamp", "blockquoteContainer");
 const BlobMask = findComponentByCodeLazy("!1,lowerBadgeSize:");
 
@@ -150,27 +170,16 @@ export default definePlugin({
         );
     }, { noop: true }),
 
-    async checkNewSessions() {
-        const data = await RestAPI.get({
-            url: Constants.Endpoints.AUTH_SESSIONS
-        });
-
-        for (const session of data.body.user_sessions) {
-            if (savedSessionsCache.has(session.id_hash)) continue;
-
-            savedSessionsCache.set(session.id_hash, { name: "", isNew: true });
-            showNotification({
-                title: "BetterSessions",
-                body: `New session:\n${session.client_info.os} · ${session.client_info.platform} · ${session.client_info.location}`,
-                permanent: true,
-                onClick: () => SettingsRouter.openUserSettings("sessions_panel")
-            });
-        }
-
-        saveSessionsToDataStore();
-    },
-
     flux: {
+        // Multi-account: savedSessionsCache is an in-memory Map seeded once in start() for whichever
+        // account was active then. Without this, switching accounts leaves the other account's
+        // session hashes in the cache, so the new account's real sessions all look "new" (and get
+        // persisted mixed together under the new account's key). Reload fresh per-account instead.
+        CURRENT_USER_UPDATE() {
+            savedSessionsCache.clear();
+            fetchNamesFromDataStore().then(() => checkNewSessions());
+        },
+
         USER_SETTINGS_ACCOUNT_RESET_AND_CLOSE_FORM() {
             const lastFetchedHashes: string[] = AuthSessionsStore.getSessions().map((session: SessionInfo["session"]) => session.id_hash);
 
@@ -199,9 +208,9 @@ export default definePlugin({
     async start() {
         await fetchNamesFromDataStore();
 
-        this.checkNewSessions();
+        checkNewSessions();
         if (settings.store.backgroundCheck) {
-            this.checkInterval = setInterval(this.checkNewSessions, settings.store.checkInterval * 60 * 1000);
+            this.checkInterval = setInterval(checkNewSessions, settings.store.checkInterval * 60 * 1000);
         }
     },
 

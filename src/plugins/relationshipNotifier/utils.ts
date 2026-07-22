@@ -122,6 +122,13 @@ export function notify(text: string, icon?: string, onClick?: () => void) {
     });
 }
 
+export function clearState() {
+    guilds.clear();
+    groups.clear();
+    friends.friends = [];
+    friends.requests = [];
+}
+
 export function getGuild(id: string) {
     return guilds.get(id);
 }
