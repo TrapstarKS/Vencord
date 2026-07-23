@@ -57,4 +57,7 @@ jobs:
                       --head sync/upstream \
                       --title "Sync upstream Vencord (conflitos - resolver manualmente)" \
                       --body "O merge automático de \`Vendicated:main\` conflitou com as suas modificações. Resolva os conflitos por aqui e faça merge." \
-                      || echo "PR já existe; a branch sync/upstream foi atualizada."
+                      || gh pr view sync/upstream >/dev/null || {
+                          echo "::error::Merge conflitou com upstream/main e não foi possível abrir nem encontrar um PR (verifique Settings > Actions > 'Allow GitHub Actions to create pull requests'). A branch sync/upstream foi atualizada, resolva manualmente."
+                          exit 1
+                      }
