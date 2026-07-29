@@ -17,7 +17,7 @@
 */
 
 import { app } from "electron";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "original-fs";
+import { copyFileSync, existsSync, readdirSync, readFileSync, renameSync, statSync } from "original-fs";
 import { basename, dirname, join } from "path";
 
 function isNewer($new: string, old: string) {
@@ -60,30 +60,28 @@ function patchLatest() {
 
         if (latestVersion === currentVersion) return;
 
-        const resources = join(discordPath, latestVersion, "resources");
-        const app = join(resources, "app.asar");
-        const _app = join(resources, "_app.asar");
+        const oldResources = join(discordPath, currentVersion, "resources");
+        const oldVencordAsar = join(oldResources, "app.asar");
 
-        if (!existsSync(app) || statSync(app).isDirectory()) return;
+        const resources = join(discordPath, latestVersion, "resources");
+        const newAppAsar = join(resources, "app.asar");
+        const newAppAsarBackup = join(resources, "_app.asar");
+
+        if (!existsSync(oldVencordAsar) || !existsSync(newAppAsar)) return;
 
         // Another Vencord build may already own this host version. This commonly happens when
         // a dev build is injected while an older/global Vencord instance is still running: its
         // before-quit auto-patcher sees the freshly-patched app.asar and would otherwise wrap it
         // a second time, losing the real Discord backup and crashing on duplicate IPC handlers.
-        if (existsSync(_app) || isVencordBootstrap(app)) {
+        if (existsSync(newAppAsarBackup) || isVencordBootstrap(newAppAsar)) {
             console.warn("[Vencord] Host update is already patched by another Vencord instance; skipping nested auto-patch");
             return;
         }
 
-        console.info("[Vencord] Detected Host Update. Repatching...");
+        console.info(`[Vencord] Detected Host Update (${currentVersion} -> ${latestVersion}). Repatching...`);
 
-        renameSync(app, _app);
-        mkdirSync(app);
-        writeFileSync(join(app, "package.json"), JSON.stringify({
-            name: "discord",
-            main: "index.js"
-        }));
-        writeFileSync(join(app, "index.js"), `require(${JSON.stringify(join(__dirname, "patcher.js"))});`);
+        renameSync(newAppAsar, newAppAsarBackup);
+        copyFileSync(oldVencordAsar, newAppAsar);
     } catch (err) {
         console.error("[Vencord] Failed to repatch latest host update", err);
     }
