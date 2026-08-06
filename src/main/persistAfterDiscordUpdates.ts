@@ -67,7 +67,7 @@ function patchLatest() {
         const newAppAsar = join(resources, "app.asar");
         const newAppAsarBackup = join(resources, "_app.asar");
 
-        if (!existsSync(oldVencordAsar) || !existsSync(newAppAsar)) return;
+        if (!existsSync(oldVencordAsar) || !existsSync(newAppAsar) || existsSync(newAppAsarBackup)) return;
 
         // Another Vencord build may already own this host version. This commonly happens when
         // a dev build is injected while an older/global Vencord instance is still running: its
