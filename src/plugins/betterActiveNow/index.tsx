@@ -201,6 +201,26 @@ function buildMissingCallCards(existingCards: any[]): any[] {
     return out;
 }
 
+let activeNowRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+function activeNowFeaturesEnabled() {
+    const { onlyCalls, callsFirst, hideImplicit, reliableCalls, sortByRelationship } = settings.store;
+    return onlyCalls || callsFirst || hideImplicit || reliableCalls || sortByRelationship;
+}
+
+function scheduleActiveNowRefresh() {
+    if (!activeNowFeaturesEnabled() || activeNowRefreshTimer) return;
+
+    activeNowRefreshTimer = setTimeout(() => {
+        activeNowRefreshTimer = undefined;
+        try {
+            NowPlayingViewStore.emitChange();
+        } catch (e) {
+            logger.error("Active Now refresh failed", e);
+        }
+    }, 50);
+}
+
 export default definePlugin({
     name: "BetterActiveNow",
     description: "Tweaks the Active Now panel: show only calls, sort calls to the top, hide non-friends, and confirm before joining a call.",
@@ -208,18 +228,64 @@ export default definePlugin({
     authors: [Devs.trapstar],
     settings,
 
-    // Patch (A) only changes what the nowPlayingCards getter *returns*; Discord's own store still decides
-    // *when* to recompute it (gated by its own scan/throttle behavior). So a friend/implicit joining a call
-    // can sit correctly-derivable-but-unread until something else happens to trigger a re-render. Forcing
-    // emitChange ourselves on the relevant voice-state change makes the panel pick it up immediately instead
-    // of waiting on Discord's internal timing.
     flux: {
-        VOICE_STATE_UPDATES({ voiceStates }: { voiceStates: Array<{ userId: string; channelId?: string | null; oldChannelId?: string | null; }>; }) {
-            const { onlyCalls, callsFirst, hideImplicit, reliableCalls, sortByRelationship } = settings.store;
-            if (!onlyCalls && !callsFirst && !hideImplicit && !reliableCalls && !sortByRelationship) return;
+        VOICE_STATE_UPDATES() {
+            scheduleActiveNowRefresh();
+        },
+        PRESENCE_UPDATES() {
+            scheduleActiveNowRefresh();
+        },
+        PRESENCES_REPLACE() {
+            scheduleActiveNowRefresh();
+        },
+        SELF_PRESENCE_STORE_UPDATE() {
+            scheduleActiveNowRefresh();
+        },
+        ACTIVITY_START() {
+            scheduleActiveNowRefresh();
+        },
+        ACTIVITY_SYNC() {
+            scheduleActiveNowRefresh();
+        },
+        LOCAL_ACTIVITY_UPDATE() {
+            scheduleActiveNowRefresh();
+        },
+        STREAMING_UPDATE() {
+            scheduleActiveNowRefresh();
+        },
+        RELATIONSHIP_ADD() {
+            scheduleActiveNowRefresh();
+        },
+        RELATIONSHIP_UPDATE() {
+            scheduleActiveNowRefresh();
+        },
+        RELATIONSHIP_REMOVE() {
+            scheduleActiveNowRefresh();
+        },
+        LOAD_USER_AFFINITIES_V2_SUCCESS() {
+            scheduleActiveNowRefresh();
+        },
+        RECEIVE_CHANNEL_AFFINITIES() {
+            scheduleActiveNowRefresh();
+        },
+        CHANNEL_CREATE() {
+            scheduleActiveNowRefresh();
+        },
+        CHANNEL_DELETE() {
+            scheduleActiveNowRefresh();
+        },
+        CHANNEL_UPDATES() {
+            scheduleActiveNowRefresh();
+        },
+        CONNECTION_OPEN() {
+            scheduleActiveNowRefresh();
+        }
+    },
 
-            const relevant = voiceStates.some(vs => vs.userId && (RelationshipStore.isFriend(vs.userId) || isTrackedImplicit(vs.userId)));
-            if (relevant) NowPlayingViewStore.emitChange();
+    stop() {
+        if (activeNowRefreshTimer) {
+            clearTimeout(activeNowRefreshTimer);
+            activeNowRefreshTimer = undefined;
         }
     },
 

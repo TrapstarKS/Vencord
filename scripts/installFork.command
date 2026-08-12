@@ -3,6 +3,7 @@
 # Se o Gatekeeper reclamar: clique com o botao direito > Abrir (so na 1a vez).
 # Se disser que nao pode executar, rode no Terminal:
 #   curl -fsSL https://raw.githubusercontent.com/TrapstarKS/Vencord/main/scripts/installFork.sh | bash
+set -euo pipefail
 clear
 curl -fsSL "https://raw.githubusercontent.com/TrapstarKS/Vencord/main/scripts/installFork.sh" | bash
 echo

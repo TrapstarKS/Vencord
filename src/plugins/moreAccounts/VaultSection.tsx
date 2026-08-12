@@ -321,7 +321,7 @@ export function VaultSection() {
                 refresh();
             })
             .catch(() => {
-                setMessage({ text: "Could not read the local vault.", error: true });
+                setMessage({ text: "Could not read the shared vault.", error: true });
             });
         return unsubscribe;
     }, []);
@@ -521,7 +521,7 @@ export function VaultSection() {
                     setCurrentPassword("");
                     setNewPassword("");
                     setNewPasswordConfirm("");
-                    return { text: "The local encrypted vault was deleted." };
+                    return { text: "The shared encrypted vault was deleted." };
                 })}
             >
                 Without the current password, the vault cannot be re-encrypted — this permanently deletes every encrypted account. Export a backup first if you might need these accounts later.
@@ -541,7 +541,7 @@ export function VaultSection() {
                 <div>
                     <Forms.FormTitle>Encrypted account vault</Forms.FormTitle>
                     <Forms.FormText>
-                        Portable, password-protected backup for your account tokens. Tokens are never shown or exported as plain text.
+                        Shared between Discord Stable and Canary on this computer, with a password-protected encrypted file. Tokens are never shown or exported as plain text.
                     </Forms.FormText>
                 </div>
                 <div className={`vc-moreAccounts-status ${snapshot.unlocked ? "vc-moreAccounts-statusUnlocked" : ""}`}>

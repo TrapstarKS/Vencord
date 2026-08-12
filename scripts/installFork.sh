@@ -20,6 +20,13 @@ DIST_DIR="$DATA_DIR/dist"
 TMP_DIR="$(mktemp -d)"
 INSTALLER_ZIP="$TMP_DIR/VencordInstaller.MacOS.zip"
 INSTALLER_BIN="$TMP_DIR/VencordInstaller.app/Contents/MacOS/VencordInstaller"
+LOCK_DIR="${TMPDIR:-/tmp}/vencord-fork-installer.lock"
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "Ja existe outra instalacao do Vencord em andamento. Feche-a e tente novamente."
+    exit 1
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 echo "======================================================"
 echo "  Instalando Vencord (fork $REPO)"
@@ -45,11 +52,10 @@ xattr -dr com.apple.quarantine "$TMP_DIR" 2>/dev/null || true
 
 # descobrir quais Discords estao instalados
 NAMES=()
-BRANCHES=()
-if [ -d "/Applications/Discord.app" ];        then NAMES+=("Discord");        BRANCHES+=("stable"); fi
-if [ -d "/Applications/Discord PTB.app" ];    then NAMES+=("Discord PTB");    BRANCHES+=("ptb");    fi
-if [ -d "/Applications/Discord Canary.app" ]; then NAMES+=("Discord Canary"); BRANCHES+=("canary"); fi
-if [ ${#BRANCHES[@]} -eq 0 ]; then
+if [ -d "/Applications/Discord.app" ];        then NAMES+=("Discord"); fi
+if [ -d "/Applications/Discord PTB.app" ];    then NAMES+=("Discord PTB"); fi
+if [ -d "/Applications/Discord Canary.app" ]; then NAMES+=("Discord Canary"); fi
+if [ ${#NAMES[@]} -eq 0 ]; then
     echo "Nenhum Discord encontrado em /Applications."
     exit 1
 fi
@@ -61,10 +67,9 @@ sleep 2
 
 export VENCORD_USER_DATA_DIR="$DATA_DIR"
 export VENCORD_DEV_INSTALL="1"
-for i in "${!BRANCHES[@]}"; do
-    echo "Injetando no ${NAMES[$i]}..."
-    "$INSTALLER_BIN" -install -branch "${BRANCHES[$i]}" || echo "  (aviso ao injetar no ${NAMES[$i]})"
-done
+echo "Abrindo o instalador oficial uma vez..."
+echo "Selecione nele a instalacao/branch que deseja modificar."
+"$INSTALLER_BIN" || echo "  (aviso: o instalador terminou com erro)"
 
 echo "Reabrindo o Discord..."
 for n in "${NAMES[@]}"; do
@@ -75,5 +80,6 @@ echo
 echo "======================================================"
 echo "  Pronto! Vencord (fork) instalado."
 echo "  Ele se auto-atualiza sozinho a partir de agora."
+echo "  O instalador foi aberto uma unica vez para evitar janelas duplicadas."
 echo "  Dica: Settings > Updater > 'Automatically update'."
 echo "======================================================"

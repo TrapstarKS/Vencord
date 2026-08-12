@@ -93,24 +93,38 @@ const TASK_LABELS: Record<string, string> = {
 };
 
 type QuestTaskConfig = {
-    tasks?: Record<string, { target?: number; }>;
+    tasks?: Record<string, QuestTask>;
+};
+
+type QuestTask = {
+    target?: number;
+    applications?: Array<{ id?: string; }>;
+    application?: { id?: string; };
+    applicationId?: string;
+    application_id?: string;
 };
 
 type Quest = {
     id: string;
     config?: {
         expiresAt?: string;
+        expires_at?: string;
         messages?: {
             questName?: string;
         };
         taskConfig?: QuestTaskConfig;
         taskConfigV2?: QuestTaskConfig;
+        task_config?: QuestTaskConfig;
+        task_config_v2?: QuestTaskConfig;
         application?: { id: string };
+        applicationId?: string;
         configVersion?: number;
     };
     userStatus?: {
         enrolledAt?: string;
+        enrolled_at?: string;
         completedAt?: string;
+        completed_at?: string;
         progress?: Record<string, { value: number }>;
         streamProgressSeconds?: number;
     };
@@ -188,9 +202,41 @@ function saveSeenIds() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify([...seenIds!]));
 }
 
+function getTaskConfigs(quest: Quest) {
+    const config = quest.config as (Quest["config"] & Record<string, any>) | undefined;
+    const tasks: Record<string, QuestTask> = {};
+
+    for (const taskConfig of [config?.taskConfig, config?.taskConfigV2, config?.task_config, config?.task_config_v2]) {
+        if (!taskConfig?.tasks || typeof taskConfig.tasks !== "object" || Array.isArray(taskConfig.tasks)) continue;
+        Object.assign(tasks, taskConfig.tasks);
+    }
+
+    return tasks;
+}
+
+function getQuestTask(quest: Quest) {
+    const tasks = getTaskConfigs(quest);
+    const name = supportedTasks.find(taskName => tasks[taskName] != null);
+    return name ? { name, config: tasks[name] } : null;
+}
+
+function isEnrolled(quest: Quest) {
+    const status = quest.userStatus as (Quest["userStatus"] & Record<string, any>) | undefined;
+    return Boolean(status?.enrolledAt ?? status?.enrolled_at) || enrolledIds.has(quest.id);
+}
+
+function isCompleted(quest: Quest) {
+    const status = quest.userStatus as (Quest["userStatus"] & Record<string, any>) | undefined;
+    return Boolean(status?.completedAt ?? status?.completed_at);
+}
+
+function getExpiry(quest: Quest) {
+    const config = quest.config as (Quest["config"] & Record<string, any>) | undefined;
+    return config?.expiresAt ?? config?.expires_at;
+}
+
 function getTaskLabel(quest: Quest) {
-    const taskConfig = quest.config?.taskConfig ?? quest.config?.taskConfigV2;
-    const taskName = taskConfig && Object.keys(taskConfig.tasks ?? {}).find(name => TASK_LABELS[name]);
+    const taskName = getQuestTask(quest)?.name;
     return (taskName && TASK_LABELS[taskName]) ?? "Quest";
 }
 
@@ -200,7 +246,7 @@ function formatExpiry(expiresAt: string) {
 }
 
 function isExpired(quest: Quest) {
-    const expiresAt = quest.config?.expiresAt;
+    const expiresAt = getExpiry(quest);
     if (!expiresAt) return false;
     const time = new Date(expiresAt).getTime();
     return !Number.isNaN(time) && time <= Date.now();
@@ -208,8 +254,8 @@ function isExpired(quest: Quest) {
 
 function shouldEnroll(quest: Quest) {
     return (
-        !quest.userStatus?.enrolledAt &&
-        !quest.userStatus?.completedAt &&
+        !isEnrolled(quest) &&
+        !isCompleted(quest) &&
         !isExpired(quest) &&
         !enrollingIds.has(quest.id) &&
         !enrolledIds.has(quest.id) &&
@@ -218,7 +264,7 @@ function shouldEnroll(quest: Quest) {
 }
 
 async function enrollQuest(quest: Quest) {
-    if (!shouldEnroll(quest)) return Boolean(quest.userStatus?.enrolledAt || enrolledIds.has(quest.id));
+    if (!shouldEnroll(quest)) return Boolean(isEnrolled(quest) || enrolledIds.has(quest.id));
 
     console.log(`[QuestNotifier] Enrolling: ${quest.config?.messages?.questName}`);
     enrollingIds.add(quest.id);
@@ -232,9 +278,12 @@ async function enrollQuest(quest: Quest) {
             }
         } as any);
 
-        quest.userStatus = res.body;
+        const body = (res as any)?.body;
+        quest.userStatus = body?.userStatus ?? body?.user_status ?? body ?? {
+            enrolledAt: new Date().toISOString()
+        };
         enrolledIds.add(quest.id);
-        QuestsStore!.emitChange();
+        QuestsStore?.emitChange();
         console.log(`[QuestNotifier] Enrolled: ${quest.config?.messages?.questName}`);
         return true;
     } catch (e) {
@@ -247,7 +296,7 @@ async function enrollQuest(quest: Quest) {
 }
 
 function notifyNewQuest(quest: Quest) {
-    const expiresAt = quest.config?.expiresAt;
+    const expiresAt = getExpiry(quest);
     const questName = quest.config?.messages?.questName ?? "Quest sem nome";
 
     console.log(`[QuestNotifier] New quest detected: ${questName}`);
@@ -281,7 +330,7 @@ function notificationCheck() {
         seen.add(quest.id);
         changed = true;
 
-        const expiresAt = quest.config?.expiresAt;
+        const expiresAt = getExpiry(quest);
         if (expiresAt && new Date(expiresAt).getTime() <= Date.now()) continue;
 
         notifyNewQuest(quest);
@@ -358,12 +407,7 @@ async function idleWait(ms: number) {
 }
 
 function isEligibleForCompletion(q: Quest) {
-    return (
-        q.userStatus?.enrolledAt &&
-        !q.userStatus?.completedAt &&
-        new Date(q.config!.expiresAt!).getTime() > Date.now() &&
-        supportedTasks.find(y => Object.keys((q.config!.taskConfig ?? q.config!.taskConfigV2)!.tasks!).includes(y))
-    );
+    return isEnrolled(q) && !isCompleted(q) && !isExpired(q) && isSupported(q);
 }
 
 function enqueueEligible(quests: Quest[]) {
@@ -407,7 +451,7 @@ function isTaskEnabled(taskName: string) {
 }
 
 function isSupported(q: Quest) {
-    const taskName = supportedTasks.find(y => Object.keys((q.config?.taskConfig ?? q.config?.taskConfigV2)?.tasks ?? {}).includes(y));
+    const taskName = getQuestTask(q)?.name;
     return !!taskName && isTaskEnabled(taskName);
 }
 
@@ -424,9 +468,10 @@ function getEnrollCheckDelayMs() {
 async function watchNewQuestsLoop() {
     console.log("[QuestNotifier] watchNewQuestsLoop started.");
     while (!stopCompletions) {
+        failedEnrollIds.clear();
         console.log("[QuestNotifier] watchNewQuestsLoop: scanning for new/unenrolled quests...");
         const all = [...QuestsStore!.quests.values()].filter(q =>
-            !q.userStatus?.completedAt &&
+            !isCompleted(q) &&
             !isExpired(q) &&
             isSupported(q)
         );
@@ -467,9 +512,10 @@ async function watchNewQuestsLoop() {
 async function runImmediateCheck() {
     if (!QuestsStore) return null;
     console.log("[QuestNotifier] runImmediateCheck: manual check triggered.");
+    failedEnrollIds.clear();
 
     const all = [...QuestsStore.quests.values()].filter(q =>
-        !q.userStatus?.completedAt &&
+        !isCompleted(q) &&
         !isExpired(q) &&
         isSupported(q)
     );
@@ -522,15 +568,101 @@ async function watchVideo(quest: Quest, secondsNeeded: number, secondsDone: numb
     console.log(`[QuestNotifier] Done: ${quest.config?.messages?.questName}`);
 }
 
+function getQuestProgress(quest: Quest, taskName: string, status = quest.userStatus) {
+    const value = quest.config?.configVersion === 1
+        ? status?.streamProgressSeconds
+        : status?.progress?.[taskName]?.value;
+    return Number.isFinite(value) ? Number(value) : 0;
+}
+
+function getApplicationId(quest: Quest, taskConfig: QuestTask) {
+    const config = quest.config as (Quest["config"] & Record<string, any>) | undefined;
+    return config?.application?.id
+        ?? config?.applicationId
+        ?? taskConfig.applications?.find(application => application?.id)?.id
+        ?? taskConfig.application?.id
+        ?? taskConfig.applicationId
+        ?? taskConfig.application_id;
+}
+
+async function waitForQuestProgress(
+    quest: Quest,
+    taskName: string,
+    secondsNeeded: number,
+    secondsDone: number,
+    restore: () => void
+) {
+    const remaining = Math.max(0, secondsNeeded - secondsDone);
+    const timeoutMs = Math.max(120_000, Math.min(30 * 60_000, (remaining + 120) * 1000));
+
+    await new Promise<void>((resolve, reject) => {
+        let finished = false;
+
+        const cleanup = () => {
+            if (finished) return;
+            finished = true;
+            if (timeoutId) clearTimeout(timeoutId);
+            if (pollId) clearInterval(pollId);
+            try {
+                FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", onHeartbeat);
+            } catch (error) {
+                console.log("[QuestNotifier] Failed to unsubscribe quest heartbeat listener:", error);
+            }
+            try {
+                restore();
+            } catch (error) {
+                console.log("[QuestNotifier] Failed to restore spoofed Discord store:", error);
+            }
+        };
+        const finish = () => {
+            cleanup();
+            resolve();
+        };
+        const fail = (error: Error) => {
+            cleanup();
+            reject(error);
+        };
+        const check = (status?: Quest["userStatus"]) => {
+            if (stopCompletions) {
+                finish();
+                return;
+            }
+            const current = QuestsStore?.quests.get(quest.id) ?? quest;
+            const progress = Math.max(
+                getQuestProgress(current, taskName),
+                getQuestProgress(quest, taskName, status)
+            );
+            if (isCompleted(current) || progress >= secondsNeeded) {
+                console.log(`[QuestNotifier] ${progress}/${secondsNeeded}`);
+                finish();
+            }
+        };
+        const onHeartbeat = (data: any) => {
+            if (stopCompletions) {
+                finish();
+                return;
+            }
+            check(data?.userStatus);
+        };
+
+        FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", onHeartbeat);
+        const pollId = setInterval(() => check(), 2000);
+        const timeoutId = setTimeout(() => {
+            fail(new Error(`${taskName} heartbeat timed out after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+        check();
+    });
+}
+
 async function playOnDesktop(quest: Quest, applicationId: string, secondsNeeded: number, secondsDone: number, pid: number) {
     console.log(`[QuestNotifier] playOnDesktop: ${quest.config?.messages?.questName} (${secondsDone}/${secondsNeeded}s done)`);
     const RunningGameStore = getRunningGameStore();
     if (!RunningGameStore) {
-        console.log("[QuestNotifier] RunningGameStore indisponível; pulando playOnDesktop.");
-        return;
+        throw new Error("RunningGameStore indisponível");
     }
     const res = await RestAPI.get({ url: `/applications/public?application_ids=${applicationId}` });
-    const appData = res.body[0];
+    const appData = res.body?.[0];
+    if (!appData) throw new Error(`application ${applicationId} não encontrada`);
     const exeName = appData.executables?.find((x: any) => x.os === "win32")?.name?.replace(">", "")
         ?? appData.name.replace(/[/\\:*?"<>|]/g, "");
 
@@ -550,88 +682,66 @@ async function playOnDesktop(quest: Quest, applicationId: string, secondsNeeded:
 
     const realGet = RunningGameStore.getRunningGames;
     const realGetPID = RunningGameStore.getGameForPID;
+    let restored = false;
+    const restore = () => {
+        if (restored) return;
+        restored = true;
+        _defProp(RunningGameStore, "getRunningGames", { value: realGet, writable: true, configurable: true, enumerable: true });
+        _defProp(RunningGameStore, "getGameForPID", { value: realGetPID, writable: true, configurable: true, enumerable: true });
+        FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [fakeGame], added: [], games: [] });
+    };
 
-    _defProp(RunningGameStore, "getRunningGames", {
-        value: spoofNative(() => [fakeGame], "getRunningGames"),
-        writable: true, configurable: true, enumerable: true
-    });
-    _defProp(RunningGameStore, "getGameForPID", {
-        value: spoofNative((p: number) => fakeGame.pid === p ? fakeGame : null, "getGameForPID"),
-        writable: true, configurable: true, enumerable: true
-    });
-    FluxDispatcher.dispatch({
-        type: "RUNNING_GAMES_CHANGE",
-        removed: realGet.call(RunningGameStore),
-        added: [fakeGame],
-        games: [fakeGame]
-    });
+    try {
+        _defProp(RunningGameStore, "getRunningGames", {
+            value: spoofNative(() => [fakeGame], "getRunningGames"),
+            writable: true, configurable: true, enumerable: true
+        });
+        _defProp(RunningGameStore, "getGameForPID", {
+            value: spoofNative((p: number) => fakeGame.pid === p ? fakeGame : null, "getGameForPID"),
+            writable: true, configurable: true, enumerable: true
+        });
+        FluxDispatcher.dispatch({
+            type: "RUNNING_GAMES_CHANGE",
+            removed: realGet.call(RunningGameStore),
+            added: [fakeGame],
+            games: [fakeGame]
+        });
 
-    console.log(`[QuestNotifier] Game spoofed. ${Math.ceil((secondsNeeded - secondsDone) / 60)} min remaining.`);
-
-    await new Promise<void>(resolve => {
-        const fn = (data: any) => {
-            if (stopCompletions) {
-                cleanup();
-                resolve();
-                return;
-            }
-            const progress = quest.config?.configVersion === 1
-                ? data.userStatus.streamProgressSeconds
-                : Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value);
-            console.log(`[QuestNotifier] ${progress}/${secondsNeeded}`);
-            if (progress >= secondsNeeded) {
-                cleanup();
-                resolve();
-            }
-        };
-        function cleanup() {
-            _defProp(RunningGameStore, "getRunningGames", { value: realGet, writable: true, configurable: true, enumerable: true });
-            _defProp(RunningGameStore, "getGameForPID", { value: realGetPID, writable: true, configurable: true, enumerable: true });
-            FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [fakeGame], added: [], games: [] });
-            FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-        }
-        FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-    });
+        console.log(`[QuestNotifier] Game spoofed. ${Math.ceil((secondsNeeded - secondsDone) / 60)} min remaining.`);
+        await waitForQuestProgress(quest, "PLAY_ON_DESKTOP", secondsNeeded, secondsDone, restore);
+    } catch (error) {
+        restore();
+        throw error;
+    }
 
     console.log(`[QuestNotifier] Done: ${quest.config?.messages?.questName}`);
 }
 
-async function streamOnDesktop(quest: Quest, applicationId: string, secondsNeeded: number, pid: number) {
+async function streamOnDesktop(quest: Quest, applicationId: string, secondsNeeded: number, secondsDone: number, pid: number) {
     console.log(`[QuestNotifier] streamOnDesktop: ${quest.config?.messages?.questName}`);
     const ApplicationStreamingStore = getAppStreamingStore();
     if (!ApplicationStreamingStore) {
-        console.log("[QuestNotifier] ApplicationStreamingStore indisponível; pulando streamOnDesktop.");
-        return;
+        throw new Error("ApplicationStreamingStore indisponível");
     }
     const realFunc = ApplicationStreamingStore.getStreamerActiveStreamMetadata;
-    _defProp(ApplicationStreamingStore, "getStreamerActiveStreamMetadata", {
-        value: spoofNative(() => ({ id: applicationId, pid, sourceName: "" }), "getStreamerActiveStreamMetadata"),
-        writable: true, configurable: true, enumerable: true,
-    });
-    console.log("[QuestNotifier] Remember: at least 1 person in vc!");
+    let restored = false;
+    const restore = () => {
+        if (restored) return;
+        restored = true;
+        _defProp(ApplicationStreamingStore, "getStreamerActiveStreamMetadata", { value: realFunc, writable: true, configurable: true, enumerable: true });
+    };
 
-    await new Promise<void>(resolve => {
-        const fn = (data: any) => {
-            if (stopCompletions) {
-                cleanup();
-                resolve();
-                return;
-            }
-            const progress = quest.config?.configVersion === 1
-                ? data.userStatus.streamProgressSeconds
-                : Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP.value);
-            console.log(`[QuestNotifier] ${progress}/${secondsNeeded}`);
-            if (progress >= secondsNeeded) {
-                cleanup();
-                resolve();
-            }
-        };
-        function cleanup() {
-            _defProp(ApplicationStreamingStore, "getStreamerActiveStreamMetadata", { value: realFunc, writable: true, configurable: true, enumerable: true });
-            FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-        }
-        FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-    });
+    try {
+        _defProp(ApplicationStreamingStore, "getStreamerActiveStreamMetadata", {
+            value: spoofNative(() => ({ id: applicationId, pid, sourceName: "" }), "getStreamerActiveStreamMetadata"),
+            writable: true, configurable: true, enumerable: true,
+        });
+        console.log("[QuestNotifier] Remember: at least 1 person in vc!");
+        await waitForQuestProgress(quest, "STREAM_ON_DESKTOP", secondsNeeded, secondsDone, restore);
+    } catch (error) {
+        restore();
+        throw error;
+    }
 
     console.log(`[QuestNotifier] Done: ${quest.config?.messages?.questName}`);
 }
@@ -640,15 +750,16 @@ async function playActivity(quest: Quest, secondsNeeded: number) {
     console.log(`[QuestNotifier] playActivity: ${quest.config?.messages?.questName}`);
     const channelId = ChannelStore.getSortedPrivateChannels()[0]?.id
         ?? Object.values(GuildChannelStore.getAllGuilds()).find(x => x?.VOCAL?.length)?.VOCAL?.[0]?.channel?.id;
+    if (!channelId) throw new Error("nenhum canal de voz disponível para PLAY_ACTIVITY");
     const streamKey = `call:${channelId}:1`;
-    if (!channelId) console.log("[QuestNotifier] playActivity: no voice channel found for stream_key!");
 
     while (!stopCompletions) {
         const res = await RestAPI.post({
             url: `/quests/${quest.id}/heartbeat`,
             body: { stream_key: streamKey, terminal: false }
         });
-        const progress = res.body.progress.PLAY_ACTIVITY.value;
+        const progress = res.body?.progress?.PLAY_ACTIVITY?.value;
+        if (!Number.isFinite(progress)) throw new Error("heartbeat sem progresso de PLAY_ACTIVITY");
         console.log(`[QuestNotifier] ${progress}/${secondsNeeded}`);
         if (progress >= secondsNeeded) {
             await RestAPI.post({
@@ -666,34 +777,38 @@ async function playActivity(quest: Quest, secondsNeeded: number) {
 async function completeQuest(quest: Quest) {
     console.log(`[QuestNotifier] completeQuest: ${quest.config?.messages?.questName}`);
     const pid = (Math.floor(Math.random() * 16000) + 250) * 4;
-    const applicationId = quest.config!.application!.id;
-    const taskConfig = quest.config!.taskConfig ?? quest.config!.taskConfigV2!;
-    const taskName = supportedTasks.find(x => taskConfig.tasks![x] != null)!;
+    const task = getQuestTask(quest);
+    if (!task) {
+        throw new Error("quest sem uma task suportada");
+    }
+    const { name: taskName, config: taskConfig } = task;
     if (!isTaskEnabled(taskName)) {
+        processedIds.delete(quest.id);
         console.log(`[QuestNotifier] Skipping ${quest.config?.messages?.questName} (${taskName} disabled in settings)`);
         return;
     }
 
-    const rawTarget = taskConfig.tasks![taskName]?.target;
+    const rawTarget = taskConfig?.target;
     if (rawTarget == null || !Number.isFinite(rawTarget) || rawTarget <= 0) {
-        console.log(`[QuestNotifier] target inválido para ${taskName}; pulando ${quest.config?.messages?.questName}`);
-        return;
+        throw new Error(`target inválido para ${taskName}`);
     }
     const secondsNeeded = rawTarget;
-    const secondsDone = quest.config!.configVersion === 1
-        ? quest.userStatus!.streamProgressSeconds ?? 0
-        : quest.userStatus!.progress?.[taskName]?.value ?? 0;
+    const secondsDone = getQuestProgress(quest, taskName);
 
     console.log(`[QuestNotifier] completeQuest: dispatching ${quest.config?.messages?.questName} to ${taskName} handler (${secondsDone}/${secondsNeeded}s)`);
 
     if (taskName === "WATCH_VIDEO" || taskName === "WATCH_VIDEO_ON_MOBILE") {
         await watchVideo(quest, secondsNeeded, secondsDone);
     } else if (taskName === "PLAY_ON_DESKTOP") {
-        if (!isApp) { console.log("[QuestNotifier] Needs desktop app for PLAY_ON_DESKTOP"); return; }
+        if (!isApp) { processedIds.delete(quest.id); return; }
+        const applicationId = getApplicationId(quest, taskConfig);
+        if (!applicationId) throw new Error("PLAY_ON_DESKTOP sem application id");
         await playOnDesktop(quest, applicationId, secondsNeeded, secondsDone, pid);
     } else if (taskName === "STREAM_ON_DESKTOP") {
-        if (!isApp) { console.log("[QuestNotifier] Needs desktop app for STREAM_ON_DESKTOP"); return; }
-        await streamOnDesktop(quest, applicationId, secondsNeeded, pid);
+        if (!isApp) { processedIds.delete(quest.id); return; }
+        const applicationId = getApplicationId(quest, taskConfig);
+        if (!applicationId) throw new Error("STREAM_ON_DESKTOP sem application id");
+        await streamOnDesktop(quest, applicationId, secondsNeeded, secondsDone, pid);
     } else if (taskName === "PLAY_ACTIVITY") {
         await playActivity(quest, secondsNeeded);
     }
@@ -719,7 +834,12 @@ async function processQueue() {
 
         // Simulate navigating to the quest UI
         await sleep(bell(3200, 600));
-        await completeQuest(quest);
+        try {
+            await completeQuest(quest);
+        } catch (e) {
+            processedIds.delete(quest.id);
+            console.log(`[QuestNotifier] Completion failed for ${quest.config?.messages?.questName}; will retry on a later scan.`, e);
+        }
 
         if (pending.length > 0) {
             const distracted = Math.random() < 0.30;
@@ -752,6 +872,11 @@ export default definePlugin({
     start() {
         console.log("[QuestNotifier] start() called.");
         stopCompletions = false;
+        pending.length = 0;
+        processedIds.clear();
+        enrollingIds.clear();
+        enrolledIds.clear();
+        failedEnrollIds.clear();
 
         (async () => {
             QuestsStore = await resolveQuestsStore();
@@ -794,5 +919,11 @@ export default definePlugin({
         console.log("[QuestNotifier] stop() called.");
         stopCompletions = true;
         QuestsStore?.removeChangeListener(notificationCheck);
+        pending.length = 0;
+        processedIds.clear();
+        enrollingIds.clear();
+        enrolledIds.clear();
+        failedEnrollIds.clear();
+        QuestsStore = null;
     }
 });

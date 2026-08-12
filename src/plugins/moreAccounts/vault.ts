@@ -6,6 +6,7 @@
 
 import * as DataStore from "@api/DataStore";
 import { Logger } from "@utils/Logger";
+import { PluginNative } from "@utils/types";
 import { UserStore } from "@webpack/common";
 
 import {
@@ -31,6 +32,10 @@ const VERSION = 1;
 const KDF_ITERATIONS = 600_000;
 const MIN_PASSWORD_LENGTH = 12;
 const MAX_BACKUP_SIZE = 20 * 1024 * 1024;
+
+const Native = IS_DISCORD_DESKTOP
+    ? VencordNative.pluginHelpers.MoreAccounts as PluginNative<typeof import("./native")>
+    : null;
 
 interface VaultAccount {
     id: string;
@@ -103,6 +108,11 @@ export interface VaultRestoreResult {
     messages: string[];
 }
 
+export interface SharedVaultSyncResult {
+    changed: boolean;
+    addedAccounts: VaultSourceAccount[];
+}
+
 interface VaultAccountIndexEntry {
     username: string;
     globalName: string | null;
@@ -119,6 +129,9 @@ let key: CryptoKey | null = null;
 let payload: VaultPayload | null = null;
 let accountIndex: VaultAccountIndex = { ready: false, accounts: {} };
 let initialized = false;
+let legacyEnvelope: VaultEnvelope | null = null;
+let sharedFingerprint: string | null = null;
+let sharedSyncPendingRestore = false;
 let mutationQueue: Promise<unknown> = Promise.resolve();
 
 const listeners = new Set<() => void>();
@@ -255,12 +268,10 @@ async function deriveKey(password: string, value: VaultEnvelope): Promise<Crypto
     );
 }
 
-async function decryptEnvelope(value: VaultEnvelope, password: string): Promise<{ key: CryptoKey; payload: VaultPayload; scrubbed: number; }> {
-    let derivedKey: CryptoKey;
+async function decryptPayloadWithKey(value: VaultEnvelope, encryptionKey: CryptoKey): Promise<{ payload: VaultPayload; scrubbed: number; }> {
     let plaintext: ArrayBuffer;
 
     try {
-        derivedKey = await deriveKey(password, value);
         const additionalData = getAdditionalData(value);
         plaintext = await crypto.subtle.decrypt(
             {
@@ -268,7 +279,7 @@ async function decryptEnvelope(value: VaultEnvelope, password: string): Promise<
                 iv: toArrayBuffer(base64ToBytes(value.cipher.iv)),
                 additionalData: toArrayBuffer(additionalData)
             },
-            derivedKey,
+            encryptionKey,
             toArrayBuffer(base64ToBytes(value.ciphertext))
         );
     } catch (error) {
@@ -291,9 +302,23 @@ async function decryptEnvelope(value: VaultEnvelope, password: string): Promise<
     const after = Object.keys(payload.accounts).length;
 
     return {
-        key: derivedKey,
         payload,
         scrubbed: Math.max(0, before - after)
+    };
+}
+
+async function decryptEnvelope(value: VaultEnvelope, password: string): Promise<{ key: CryptoKey; payload: VaultPayload; scrubbed: number; }> {
+    let derivedKey: CryptoKey;
+    try {
+        derivedKey = await deriveKey(password, value);
+    } catch (error) {
+        logger.warn("failed to derive vault key", error);
+        throw new Error("Wrong password, corrupted file, or unsupported backup.");
+    }
+
+    return {
+        key: derivedKey,
+        ...await decryptPayloadWithKey(value, derivedKey)
     };
 }
 
@@ -347,9 +372,124 @@ function buildIndexFromPayload(value: VaultPayload): VaultAccountIndex {
     return { ready: true, accounts };
 }
 
+function getEnvelopeFingerprint(value: VaultEnvelope | null) {
+    return value ? `${value.updatedAt}\u0000${value.ciphertext}` : null;
+}
+
+function mergeVaultPayloads(primary: VaultPayload, secondary: VaultPayload): VaultPayload {
+    const accounts = { ...primary.accounts };
+
+    for (const [id, incoming] of Object.entries(secondary.accounts)) {
+        const current = accounts[id];
+        if (!current || incoming.updatedAt > current.updatedAt) accounts[id] = incoming;
+    }
+
+    return { version: VERSION, accounts };
+}
+
+function vaultPayloadsEqual(first: VaultPayload, second: VaultPayload) {
+    const firstIds = Object.keys(first.accounts).sort();
+    const secondIds = Object.keys(second.accounts).sort();
+    if (firstIds.length !== secondIds.length || firstIds.some((id, index) => id !== secondIds[index])) return false;
+
+    return firstIds.every(id => JSON.stringify(first.accounts[id]) === JSON.stringify(second.accounts[id]));
+}
+
+function toVaultSourceAccount(account: VaultAccount): VaultSourceAccount {
+    return {
+        id: account.id,
+        token: account.token,
+        username: account.username,
+        avatar: account.avatar,
+        discriminator: account.discriminator,
+        globalName: account.globalName
+    };
+}
+
+function getAccountsMissingFromSwitcher(): VaultSourceAccount[] {
+    if (!payload) return [];
+
+    const activeIds = new Set(getVaultSourceAccounts().map(account => account.id));
+    return Object.values(payload.accounts)
+        .filter(account => !activeIds.has(account.id))
+        .map(toVaultSourceAccount);
+}
+
+async function clearLegacyDataStore() {
+    await Promise.all([
+        DataStore.del(DATA_KEY).catch(() => void 0),
+        DataStore.del(INDEX_KEY).catch(() => void 0)
+    ]);
+}
+
+async function writeStoredVault(nextEnvelope: VaultEnvelope | null, nextIndex: VaultAccountIndex | null) {
+    if (Native) {
+        await Native.writeVaultStorage(nextEnvelope, nextIndex);
+        sharedFingerprint = getEnvelopeFingerprint(nextEnvelope);
+        return;
+    }
+
+    await Promise.all([
+        nextEnvelope == null ? DataStore.del(DATA_KEY) : DataStore.set(DATA_KEY, nextEnvelope),
+        nextIndex == null ? DataStore.del(INDEX_KEY) : DataStore.set(INDEX_KEY, nextIndex)
+    ]);
+}
+
+async function deleteStoredVault() {
+    if (Native) await Native.deleteVaultStorage();
+    await clearLegacyDataStore();
+}
+
+async function readStoredVault() {
+    const [stored, storedIndex] = await Promise.all([
+        DataStore.get<unknown>(DATA_KEY),
+        DataStore.get<unknown>(INDEX_KEY)
+    ]);
+    const localEnvelope = isEnvelope(stored) ? stored : null;
+
+    if (Native) {
+        const shared = await Native.readVaultStorage();
+        if (shared) {
+            const sharedEnvelope = isEnvelope(shared.envelope) ? shared.envelope : null;
+            legacyEnvelope = sharedEnvelope && localEnvelope
+                && getEnvelopeFingerprint(sharedEnvelope) !== getEnvelopeFingerprint(localEnvelope)
+                ? localEnvelope
+                : null;
+            sharedFingerprint = getEnvelopeFingerprint(sharedEnvelope);
+            return { envelope: sharedEnvelope, index: shared.index };
+        }
+
+        if (localEnvelope) {
+            await writeStoredVault(localEnvelope, normalizeAccountIndex(storedIndex));
+            legacyEnvelope = localEnvelope;
+            return { envelope: localEnvelope, index: storedIndex };
+        }
+    }
+
+    legacyEnvelope = null;
+    sharedFingerprint = getEnvelopeFingerprint(localEnvelope);
+    return { envelope: localEnvelope, index: storedIndex };
+}
+
+async function mergeLatestSharedVault() {
+    if (!Native || !envelope || !key || !payload) return;
+
+    const stored = await Native.readVaultStorage();
+    const latest = stored && isEnvelope(stored.envelope) ? stored.envelope : null;
+    const latestFingerprint = getEnvelopeFingerprint(latest);
+    if (latestFingerprint === sharedFingerprint) return;
+    if (!latest) throw new Error("The shared vault was deleted in the other Discord instance.");
+
+    const incoming = await decryptPayloadWithKey(latest, key);
+    payload = mergeVaultPayloads(payload, incoming.payload);
+    envelope = latest;
+    accountIndex = normalizeAccountIndex(stored?.index);
+    sharedFingerprint = latestFingerprint;
+}
+
 async function persistAccountIndex(next: VaultAccountIndex) {
     accountIndex = next;
-    await DataStore.set(INDEX_KEY, next);
+    await writeStoredVault(envelope, next);
 }
 
 async function writeIndexFromPayload(value: VaultPayload) {
@@ -358,7 +498,8 @@ async function writeIndexFromPayload(value: VaultPayload) {
 
 async function clearAccountIndex() {
     accountIndex = { ready: false, accounts: {} };
-    await DataStore.del(INDEX_KEY);
+    if (envelope) await writeStoredVault(envelope, null);
+    else await deleteStoredVault();
 }
 
 function normalizeAccountIndex(value: unknown): VaultAccountIndex {
@@ -385,9 +526,10 @@ function normalizeAccountIndex(value: unknown): VaultAccountIndex {
 
 async function persistUnlockedVault() {
     if (!envelope || !key || !payload) throw new Error("Unlock the vault first.");
+    await mergeLatestSharedVault();
     envelope = await encryptPayload(payload, key, envelope);
-    await DataStore.set(DATA_KEY, envelope);
-    await writeIndexFromPayload(payload);
+    accountIndex = buildIndexFromPayload(payload);
+    await writeStoredVault(envelope, accountIndex);
     notify();
 }
 
@@ -425,15 +567,94 @@ function publicAccount(account: VaultAccount): PublicVaultAccount {
 export async function initializeVault() {
     if (initialized) return;
 
-    const [stored, storedIndex] = await Promise.all([
-        DataStore.get<unknown>(DATA_KEY),
-        DataStore.get<unknown>(INDEX_KEY)
-    ]);
-    envelope = isEnvelope(stored) ? stored : null;
-    accountIndex = envelope ? normalizeAccountIndex(storedIndex) : { ready: false, accounts: {} };
-    if (!envelope && storedIndex != null) await DataStore.del(INDEX_KEY).catch(() => void 0);
+    const stored = await readStoredVault();
+    envelope = isEnvelope(stored.envelope) ? stored.envelope : null;
+    accountIndex = envelope ? normalizeAccountIndex(stored.index) : { ready: false, accounts: {} };
+    if (!envelope && stored.index != null) await clearAccountIndex().catch(() => void 0);
+    sharedSyncPendingRestore = envelope != null;
     initialized = true;
     notify();
+}
+
+export function syncSharedVault(): Promise<SharedVaultSyncResult> {
+    return enqueue(async () => {
+        if (!Native || !initialized) return { changed: false, addedAccounts: [] };
+
+        const stored = await Native.readVaultStorage();
+        const incomingEnvelope = stored && isEnvelope(stored.envelope) ? stored.envelope : null;
+        const incomingFingerprint = getEnvelopeFingerprint(incomingEnvelope);
+
+        if (incomingFingerprint === sharedFingerprint) {
+            if (!sharedSyncPendingRestore || !payload || !key) {
+                return { changed: false, addedAccounts: [] };
+            }
+
+            const addedAccounts = getAccountsMissingFromSwitcher();
+            sharedSyncPendingRestore = false;
+            return { changed: false, addedAccounts };
+        }
+
+        if (!incomingEnvelope) {
+            const changed = envelope != null;
+            envelope = null;
+            key = null;
+            payload = null;
+            accountIndex = { ready: false, accounts: {} };
+            legacyEnvelope = null;
+            sharedFingerprint = null;
+            sharedSyncPendingRestore = false;
+            await clearLegacyDataStore();
+            if (changed) notify();
+            return { changed, addedAccounts: [] };
+        }
+
+        if (!envelope || !key || !payload) {
+            envelope = incomingEnvelope;
+            accountIndex = normalizeAccountIndex(stored?.index);
+            sharedFingerprint = incomingFingerprint;
+            sharedSyncPendingRestore = true;
+            notify();
+            return { changed: true, addedAccounts: [] };
+        }
+
+        let incoming: VaultPayload;
+        try {
+            incoming = (await decryptPayloadWithKey(incomingEnvelope, key)).payload;
+        } catch (error) {
+            logger.warn("shared vault changed to a different password; locking local copy", error);
+            envelope = incomingEnvelope;
+            key = null;
+            payload = null;
+            accountIndex = normalizeAccountIndex(stored?.index);
+            sharedFingerprint = incomingFingerprint;
+            sharedSyncPendingRestore = true;
+            notify();
+            return { changed: true, addedAccounts: [] };
+        }
+
+        const currentIds = new Set(Object.keys(payload.accounts));
+        const addedAccounts = Object.values(incoming.accounts)
+            .filter(account => !currentIds.has(account.id))
+            .map(toVaultSourceAccount);
+        const merged = mergeVaultPayloads(payload, incoming);
+        envelope = incomingEnvelope;
+        payload = merged;
+        accountIndex = normalizeAccountIndex(stored?.index);
+        sharedFingerprint = incomingFingerprint;
+
+        if (!vaultPayloadsEqual(merged, incoming)) {
+            await persistUnlockedVault();
+        } else {
+            notify();
+        }
+
+        const restored = sharedSyncPendingRestore ? getAccountsMissingFromSwitcher() : [];
+        sharedSyncPendingRestore = false;
+        return {
+            changed: true,
+            addedAccounts: [...addedAccounts, ...restored.filter(account => !addedAccounts.some(added => added.id === account.id))]
+        };
+    });
 }
 
 export function subscribeVault(listener: () => void) {
@@ -546,7 +767,10 @@ export function createVault(password: string): Promise<VaultSyncResult> {
         envelope = emptyEnvelope;
         key = derivedKey;
         payload = { version: VERSION, accounts };
+        legacyEnvelope = null;
+        sharedSyncPendingRestore = true;
         await persistUnlockedVault();
+        await clearLegacyDataStore();
 
         return { added: Object.keys(accounts).length, updated: 0 };
     });
@@ -561,14 +785,34 @@ export function unlockVault(password: string): Promise<number> {
         key = decrypted.key;
         payload = decrypted.payload;
 
+        let legacyMerged = false;
+        let legacyMergeFailed = false;
+        const legacyToMerge = legacyEnvelope;
+        if (legacyToMerge && getEnvelopeFingerprint(legacyToMerge) !== getEnvelopeFingerprint(envelope)) {
+            try {
+                const legacy = await decryptEnvelope(legacyToMerge, password);
+                const merged = mergeVaultPayloads(payload, legacy.payload);
+                legacyMerged = !vaultPayloadsEqual(payload, merged);
+                payload = merged;
+            } catch (error) {
+                legacyMergeFailed = true;
+                logger.warn("could not merge an older branch-local vault; keeping it for manual backup/import", error);
+            }
+        }
+
         // Persist if garbage rows were dropped during normalize, so the bad ciphertext is rewritten.
-        if (decrypted.scrubbed) {
-            logger.warn(`scrubbed ${decrypted.scrubbed} invalid vault account(s) on unlock`);
+        if (decrypted.scrubbed || legacyMerged) {
+            if (decrypted.scrubbed) logger.warn(`scrubbed ${decrypted.scrubbed} invalid vault account(s) on unlock`);
             await persistUnlockedVault();
         } else {
             // Legacy vaults get an index on first unlock so new-account prompts can work afterwards.
             await writeIndexFromPayload(payload);
         }
+        if (!legacyMergeFailed) {
+            legacyEnvelope = null;
+            await clearLegacyDataStore();
+        }
+        sharedSyncPendingRestore = true;
         notify();
         return decrypted.scrubbed;
     });
@@ -593,6 +837,18 @@ export function changeVaultPassword(currentPassword: string, newPassword: string
         // Always verify against the on-disk envelope (works locked or unlocked).
         const decrypted = await decryptEnvelope(envelope, currentPassword);
 
+        let sourceEnvelope = envelope;
+        let sourcePayload = decrypted.payload;
+        if (Native) {
+            const stored = await Native.readVaultStorage();
+            const latest = stored && isEnvelope(stored.envelope) ? stored.envelope : null;
+            if (latest && getEnvelopeFingerprint(latest) !== getEnvelopeFingerprint(envelope)) {
+                const latestDecrypted = await decryptEnvelope(latest, currentPassword);
+                sourceEnvelope = latest;
+                sourcePayload = mergeVaultPayloads(sourcePayload, latestDecrypted.payload);
+            }
+        }
+
         const now = new Date().toISOString();
         const nextBase: VaultEnvelope = {
             magic: MAGIC,
@@ -607,18 +863,18 @@ export function changeVaultPassword(currentPassword: string, newPassword: string
                 name: "AES-256-GCM",
                 iv: randomBase64(12)
             },
-            createdAt: envelope.createdAt,
+            createdAt: sourceEnvelope.createdAt,
             updatedAt: now,
-            accountCount: Object.keys(decrypted.payload.accounts).length,
+            accountCount: Object.keys(sourcePayload.accounts).length,
             ciphertext: ""
         };
 
         const newKey = await deriveKey(newPassword, nextBase);
-        payload = decrypted.payload;
+        payload = sourcePayload;
         key = newKey;
         envelope = await encryptPayload(payload, newKey, nextBase);
-        await DataStore.set(DATA_KEY, envelope);
-        await writeIndexFromPayload(payload);
+        accountIndex = buildIndexFromPayload(payload);
+        await writeStoredVault(envelope, accountIndex);
         notify();
     });
 }
@@ -626,6 +882,7 @@ export function changeVaultPassword(currentPassword: string, newPassword: string
 export function lockVault() {
     key = null;
     payload = null;
+    sharedSyncPendingRestore = envelope != null;
     notify();
 }
 
@@ -634,8 +891,11 @@ export function deleteVault(): Promise<void> {
         key = null;
         payload = null;
         envelope = null;
-        await DataStore.del(DATA_KEY);
-        await clearAccountIndex();
+        await deleteStoredVault();
+        accountIndex = { ready: false, accounts: {} };
+        legacyEnvelope = null;
+        sharedFingerprint = null;
+        sharedSyncPendingRestore = false;
         notify();
     });
 }
@@ -899,8 +1159,8 @@ export function importVaultBackup(raw: string, password: string): Promise<VaultI
             if (imported.scrubbed) {
                 await persistUnlockedVault();
             } else {
-                await DataStore.set(DATA_KEY, envelope);
-                await writeIndexFromPayload(payload);
+                accountIndex = buildIndexFromPayload(payload);
+                await writeStoredVault(envelope, accountIndex);
             }
             notify();
             return { added: Object.keys(payload.accounts).length, updated: 0, unchanged: 0 };

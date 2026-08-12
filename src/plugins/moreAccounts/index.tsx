@@ -26,6 +26,7 @@ import {
     rehideTokenAfterSoftLogout,
     rememberAccountProfile,
     rememberTokenForSoftLogout,
+    restoreAccountToSwitcher,
     restoreHiddenAccounts,
     saveCurrentAccounts,
     storageReady
@@ -37,6 +38,7 @@ import {
     initializeVault,
     lockVault,
     saveAccountToUnlockedVault,
+    syncSharedVault,
     syncVaultFromDiscord
 } from "./vault";
 import { VaultSection } from "./VaultSection";
@@ -51,6 +53,8 @@ let autoRestoreAttempts = 0;
 let autoRestoreRunning = false;
 let autoVaultTimer: ReturnType<typeof setTimeout> | null = null;
 let vaultPromptTimer: ReturnType<typeof setTimeout> | null = null;
+let sharedVaultTimer: ReturnType<typeof setInterval> | null = null;
+let sharedVaultSyncRunning = false;
 
 let sessionPrimed = false;
 let sessionStartupOffered = false;
@@ -60,6 +64,7 @@ let vaultModalOpen = false;
 let dismissedStartup = false;
 const dismissedSwitchForUser = new Set<string>();
 const dismissedMissingIds = new Set<string>();
+const sharedRestoreAttempts = new Map<string, number>();
 
 function RestoreSection() {
     const [busy, setBusy] = useState(false);
@@ -358,6 +363,45 @@ function scheduleVaultSync(delay = 1200) {
             .then(notifyVaultSyncResult)
             .catch(() => void 0);
     }, delay);
+}
+
+async function runSharedVaultSync() {
+    if (sharedVaultSyncRunning) return;
+    sharedVaultSyncRunning = true;
+
+    try {
+        const result = await syncSharedVault();
+        const now = Date.now();
+
+        for (const account of result.addedAccounts) {
+            const previousAttempt = sharedRestoreAttempts.get(account.id) ?? 0;
+            if (now - previousAttempt < 30_000) continue;
+            sharedRestoreAttempts.set(account.id, now);
+
+            const restored = await restoreAccountToSwitcher(account);
+            if (!restored.ok) {
+                logger.warn("shared vault account could not be restored to the switcher", account.id, restored.reason);
+            }
+        }
+    } catch (error) {
+        logger.warn("shared vault sync failed", error);
+    } finally {
+        sharedVaultSyncRunning = false;
+    }
+}
+
+function startSharedVaultSync() {
+    if (sharedVaultTimer) clearInterval(sharedVaultTimer);
+    sharedRestoreAttempts.clear();
+    sharedVaultTimer = setInterval(() => void runSharedVaultSync(), 2_000);
+    void runSharedVaultSync();
+}
+
+function stopSharedVaultSync() {
+    if (sharedVaultTimer) clearInterval(sharedVaultTimer);
+    sharedVaultTimer = null;
+    sharedVaultSyncRunning = false;
+    sharedRestoreAttempts.clear();
 }
 
 function scheduleVaultPrompt(delay = 1200) {
@@ -798,6 +842,7 @@ export default definePlugin({
 
     async start() {
         await initializeVault().catch(() => void 0);
+        startSharedVaultSync();
         await loadSavedAccounts().catch(() => void 0);
         await loadAvatarCache().catch(() => void 0);
         await saveCurrentAccounts().catch(() => void 0);
@@ -811,6 +856,7 @@ export default definePlugin({
     },
 
     stop() {
+        stopSharedVaultSync();
         if (autoRestoreTimer) clearTimeout(autoRestoreTimer);
         autoRestoreTimer = null;
         autoRestoreAttempts = 0;
