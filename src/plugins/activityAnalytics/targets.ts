@@ -11,6 +11,15 @@ import { UserAffinity } from "./types";
 
 let cachedTrackedIds: Set<string> | null = null;
 
+function parseUserIds(value?: string): string[] {
+    return Array.from(new Set(
+        (value ?? "")
+            .split(/[,\s]+/)
+            .map(id => id.trim())
+            .filter(Boolean)
+    ));
+}
+
 export function invalidateTargetCache() {
     cachedTrackedIds = null;
 }
@@ -35,6 +44,8 @@ export function getTrackedUserIds(): Set<string> {
     if (cachedTrackedIds) return cachedTrackedIds;
 
     const ids = getFriendIds();
+
+    for (const id of parseUserIds(settings.store.trackedUserIds)) ids.add(id);
 
     if (settings.store.trackImplicitContacts) {
         const limit = settings.store.implicitContactLimit ?? 20;

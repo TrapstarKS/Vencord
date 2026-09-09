@@ -8,6 +8,11 @@ import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
 
 export default definePluginSettings({
+    trackedUserIds: {
+        type: OptionType.STRING,
+        description: "Always track these user IDs too, separated by comma, space, or new line.",
+        default: ""
+    },
     trackImplicitContacts: {
         type: OptionType.BOOLEAN,
         description: "Also track non-friend contacts you frequently interact with (implicit relationships)",

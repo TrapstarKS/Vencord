@@ -4,13 +4,17 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { FluxDispatcher, GuildMemberStore, GuildStore, UserProfileStore } from "@webpack/common";
+import { Logger } from "@utils/Logger";
+import { FluxDispatcher, GuildMemberStore, GuildStore, UserProfileStore, VoiceStateStore } from "@webpack/common";
 
 import settings from "./settings";
 import { getImplicitTrackedIds, getTrackedUserIds } from "./targets";
-import { applyRetentionSweep, heartbeatFlush, pruneUntrackedSessions } from "./tracking";
+import { applyRetentionSweep, heartbeatFlush, pruneUntrackedSessions, reconcileTrackedVoiceSessions } from "./tracking";
 
 const SCAN_DELAY_MS = 1500;
+const VOICE_RECONCILE_INTERVAL_MS = 15_000;
+const VOICE_RECONCILE_DEBOUNCE_MS = 750;
+const logger = new Logger("ActivityAnalytics");
 
 const presenceRefreshQueue: string[] = [];
 const presenceRefreshQueued = new Set<string>();
@@ -18,6 +22,11 @@ let presenceScanning = false;
 let presenceScanTimer: ReturnType<typeof setTimeout> | undefined;
 
 let intervalTimer: ReturnType<typeof setInterval> | undefined;
+let voiceReconcileTimer: ReturnType<typeof setTimeout> | undefined;
+let voiceReconcileInterval: ReturnType<typeof setInterval> | undefined;
+let voiceBootstrapTimers: ReturnType<typeof setTimeout>[] = [];
+let voiceStoreListener: (() => void) | undefined;
+let schedulerStarted = false;
 
 function getKnownMutualGuildIds(userId: string) {
     const allGuildIds = Object.keys(GuildStore.getGuilds());
@@ -72,16 +81,48 @@ function processNextPresenceRefresh() {
 export function runScanTick() {
     const tracked = getTrackedUserIds();
     enqueuePresenceRefresh(getImplicitTrackedIds());
+    reconcileTrackedVoiceSessions(tracked);
     pruneUntrackedSessions(tracked);
     applyRetentionSweep(tracked);
     heartbeatFlush();
 }
 
+function runVoiceReconcile() {
+    try {
+        reconcileTrackedVoiceSessions(getTrackedUserIds());
+    } catch (error) {
+        // A partial store/channel record must not stop the presence and retention scheduler.
+        logger.error("Voice reconciliation failed", error);
+    }
+}
+
+/** Coalesces a busy guild's many VoiceStateStore emissions into one tracked-user pass. */
+export function scheduleVoiceReconciliation(delayMs = VOICE_RECONCILE_DEBOUNCE_MS) {
+    if (!schedulerStarted || voiceReconcileTimer != null) return;
+
+    voiceReconcileTimer = setTimeout(() => {
+        voiceReconcileTimer = undefined;
+        runVoiceReconcile();
+    }, Math.max(0, delayMs));
+}
+
 export function startScanScheduler() {
     // Guard the immediate tick too, so start() + CONNECTION_OPEN at cold launch run it only once.
     if (intervalTimer != null) return;
+    schedulerStarted = true;
+
+    if (!voiceStoreListener && VoiceStateStore?.addChangeListener) {
+        voiceStoreListener = () => scheduleVoiceReconciliation();
+        VoiceStateStore.addChangeListener(voiceStoreListener);
+    }
+
     runScanTick();
     intervalTimer = setInterval(runScanTick, (settings.store.scanIntervalMinutes ?? 60) * 60000);
+    voiceReconcileInterval = setInterval(() => scheduleVoiceReconciliation(0), VOICE_RECONCILE_INTERVAL_MS);
+
+    // Give large guilds extra time to hydrate their voice cache after startup.
+    voiceBootstrapTimers = [4000, 10_000]
+        .map(delay => setTimeout(() => scheduleVoiceReconciliation(0), delay));
 }
 
 /** Recreates the interval so a changed scanIntervalMinutes takes effect without a restart. */
@@ -91,6 +132,8 @@ export function rescheduleScanInterval() {
 }
 
 export function stopScanScheduler() {
+    schedulerStarted = false;
+
     if (intervalTimer != null) {
         clearInterval(intervalTimer);
         intervalTimer = undefined;
@@ -98,6 +141,20 @@ export function stopScanScheduler() {
     if (presenceScanTimer != null) {
         clearTimeout(presenceScanTimer);
         presenceScanTimer = undefined;
+    }
+    if (voiceReconcileTimer != null) {
+        clearTimeout(voiceReconcileTimer);
+        voiceReconcileTimer = undefined;
+    }
+    if (voiceReconcileInterval != null) {
+        clearInterval(voiceReconcileInterval);
+        voiceReconcileInterval = undefined;
+    }
+    for (const timer of voiceBootstrapTimers) clearTimeout(timer);
+    voiceBootstrapTimers = [];
+    if (voiceStoreListener) {
+        VoiceStateStore?.removeChangeListener?.(voiceStoreListener);
+        voiceStoreListener = undefined;
     }
 
     presenceRefreshQueue.length = 0;

@@ -119,7 +119,13 @@ interface TrackedVoiceEvent {
     changes: StatusChange[];
     session?: SessionSnapshot;
     channelMembers: ChannelMemberSnapshot[];
+    /** Total members in the channel before the snapshot cap is applied. */
+    channelMemberCount?: number;
+    channelMembersTruncated?: boolean;
     oldChannelMembers: ChannelMemberSnapshot[];
+    /** Total members in the old channel before the snapshot cap is applied. */
+    oldChannelMemberCount?: number;
+    oldChannelMembersTruncated?: boolean;
     raw: {
         userId: string;
         guildId?: string;
@@ -140,6 +146,12 @@ const logger = new Logger("VcTracker");
  * false rejoin for the same ongoing call.
  */
 const RECONCILE_RETRY_DELAY_MS = 4000;
+/** How often to compare tracked users against VoiceStateStore as a safety net for missed dispatches. */
+const VOICE_RECONCILE_INTERVAL_MS = 15_000;
+/** Coalesce bursts of VoiceStateStore changes from busy guilds into one small reconciliation pass. */
+const VOICE_RECONCILE_DEBOUNCE_MS = 750;
+/** Do not turn a temporarily incomplete large-guild store into a false leave immediately. */
+const VOICE_STATE_MISSING_GRACE_MS = 45_000;
 
 const settings = definePluginSettings({
     trackedUserIds: {
@@ -151,6 +163,16 @@ const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Save who is in the voice channel when a tracked event happens.",
         default: true,
+    },
+    maxCallMembers: {
+        type: OptionType.SLIDER,
+        description: "Maximum number of call members to save per event (the total count is still kept).",
+        markers: [25, 50, 100, 250, 500],
+        default: 100,
+        stickToMarkers: true,
+        disabled() {
+            return !this.store.includeCallMembers;
+        }
     },
     showChatSummary: {
         type: OptionType.BOOLEAN,
@@ -191,6 +213,13 @@ const eventMeta: Record<EventType, { label: string; color: string; }> = {
 let activeSessions: Record<string, ActiveVoiceSession> = {};
 let activeSessionsLoaded = false;
 let voiceQueue = Promise.resolve();
+let voiceReconcileTimer: ReturnType<typeof setTimeout> | undefined;
+let voiceReconcileInterval: ReturnType<typeof setInterval> | undefined;
+let voiceBootstrapTimers: ReturnType<typeof setTimeout>[] = [];
+let voiceStoreListener: (() => void) | undefined;
+let trackerReady = false;
+let trackerLifecycle = 0;
+const missingVoiceStateSince: Record<string, number> = {};
 
 const logSignals = new Set<() => void>();
 
@@ -207,23 +236,100 @@ function parseUserIds(value?: string) {
     ));
 }
 
+/**
+ * Discord's internal voice-state objects normally use camelCase, but a partial gateway/store
+ * object can briefly expose snake_case fields while a large guild is hydrating. Normalize both
+ * shapes before applying the tracked-user filter so the fallback path cannot miss the user.
+ */
+function normalizeVoiceState(raw: unknown): VoiceStateUpdate | null {
+    if (!raw || typeof raw !== "object") return null;
+
+    const state = raw as Record<string, unknown>;
+    const userId = typeof state.userId === "string"
+        ? state.userId
+        : typeof state.user_id === "string"
+            ? state.user_id
+            : undefined;
+
+    if (!userId) return null;
+
+    const readVoiceId = (camel: string, snake: string) => {
+        const value = camel in state ? state[camel] : state[snake];
+        return typeof value === "string" || value === null || value === undefined ? value : undefined;
+    };
+
+    return {
+        ...state as unknown as VoiceStateUpdate,
+        userId,
+        guildId: readVoiceId("guildId", "guild_id"),
+        channelId: readVoiceId("channelId", "channel_id"),
+        oldChannelId: readVoiceId("oldChannelId", "old_channel_id"),
+        sessionId: readVoiceId("sessionId", "session_id"),
+    };
+}
+
+function normalizeVoiceStates(raw: unknown): VoiceStateUpdate[] {
+    if (Array.isArray(raw)) return raw.map(normalizeVoiceState).filter((state): state is VoiceStateUpdate => Boolean(state));
+    if (!raw || typeof raw !== "object") return [];
+
+    const state = raw as Record<string, unknown>;
+    if ("userId" in state || "user_id" in state) {
+        const normalized = normalizeVoiceState(state);
+        return normalized ? [normalized] : [];
+    }
+
+    return Object.values(state)
+        .map(normalizeVoiceState)
+        .filter((voiceState): voiceState is VoiceStateUpdate => Boolean(voiceState));
+}
+
 function getTrackedUserIds() {
     return parseUserIds(settings.store.trackedUserIds);
 }
 
 function getUserSnapshot(userId: string, guildId?: string | null): UserSnapshot {
-    const user = UserStore.getUser(userId) as User | undefined;
-    const member = guildId ? GuildMemberStore.getMember(guildId, userId) : undefined;
-    const guildAvatarUrl = guildId && member?.avatar
-        ? IconUtils.getGuildMemberAvatarURLSimple({
-            guildId,
-            userId,
-            avatar: member.avatar,
-            canAnimate: true,
-            size: 128,
-        })
-        : undefined;
-    const nick = guildId ? GuildMemberStore.getNick(guildId, userId) : undefined;
+    let user: User | undefined;
+    let member: ReturnType<typeof GuildMemberStore.getMember> | undefined;
+    let guildAvatarUrl: string | undefined;
+    let nick: string | null | undefined;
+
+    // Profile/member enrichment is best-effort. A custom profile or a partially hydrated large
+    // guild must never prevent the raw user/channel transition from being logged.
+    try {
+        user = UserStore.getUser(userId) as User | undefined;
+    } catch (error) {
+        logger.error(`Failed to resolve user ${userId}`, error);
+    }
+    try {
+        member = guildId ? GuildMemberStore.getMember(guildId, userId) : undefined;
+    } catch (error) {
+        logger.error(`Failed to resolve guild member ${userId}`, error);
+    }
+    try {
+        guildAvatarUrl = guildId && member?.avatar
+            ? IconUtils.getGuildMemberAvatarURLSimple({
+                guildId,
+                userId,
+                avatar: member.avatar,
+                canAnimate: true,
+                size: 128,
+            })
+            : undefined;
+    } catch (error) {
+        logger.error(`Failed to resolve guild avatar ${userId}`, error);
+    }
+    try {
+        nick = guildId ? GuildMemberStore.getNick(guildId, userId) : undefined;
+    } catch (error) {
+        logger.error(`Failed to resolve guild nickname ${userId}`, error);
+    }
+
+    let avatarUrl: string | undefined;
+    try {
+        avatarUrl = user?.getAvatarURL?.(undefined, 128, true);
+    } catch (error) {
+        logger.error(`Failed to resolve avatar ${userId}`, error);
+    }
 
     return {
         id: userId,
@@ -231,9 +337,9 @@ function getUserSnapshot(userId: string, guildId?: string | null): UserSnapshot 
         username: user?.username,
         globalName: user?.globalName,
         tag: user?.tag,
-        avatarUrl: user?.getAvatarURL?.(undefined, 128, true),
+        avatarUrl,
         guildAvatarUrl,
-        iconUrl: guildAvatarUrl ?? user?.getAvatarURL?.(undefined, 128, true),
+        iconUrl: guildAvatarUrl ?? avatarUrl,
         bot: user?.bot,
     };
 }
@@ -241,16 +347,29 @@ function getUserSnapshot(userId: string, guildId?: string | null): UserSnapshot 
 function getGuildSnapshot(guildId?: string | null): EntitySnapshot | null {
     if (!guildId) return null;
 
-    const guild = GuildStore.getGuild(guildId);
-    return {
-        id: guildId,
-        name: guild?.name,
-        iconUrl: guild ? IconUtils.getGuildIconURL({
+    let guild: ReturnType<typeof GuildStore.getGuild> | undefined;
+    try {
+        guild = GuildStore.getGuild(guildId);
+    } catch (error) {
+        logger.error(`Failed to resolve guild ${guildId}`, error);
+    }
+
+    let iconUrl: string | undefined;
+    try {
+        iconUrl = guild ? IconUtils.getGuildIconURL({
             id: guild.id,
             icon: guild.icon,
             canAnimate: true,
             size: 64,
-        }) : undefined,
+        }) : undefined;
+    } catch (error) {
+        logger.error(`Failed to resolve guild icon ${guildId}`, error);
+    }
+
+    return {
+        id: guildId,
+        name: guild?.name,
+        iconUrl,
     };
 }
 
@@ -268,16 +387,36 @@ function getChannelDisplayName(channel?: Channel | null) {
 function getChannelSnapshot(channelId?: string | null): EntitySnapshot | null {
     if (!channelId) return null;
 
-    const channel = ChannelStore.getChannel(channelId) as Channel | undefined;
-    return {
-        id: channelId,
-        name: getChannelDisplayName(channel) ?? channelId,
-        iconUrl: channel ? IconUtils.getChannelIconURL({
+    let channel: Channel | undefined;
+    try {
+        channel = ChannelStore.getChannel(channelId) as Channel | undefined;
+    } catch (error) {
+        logger.error(`Failed to resolve channel ${channelId}`, error);
+    }
+
+    let iconUrl: string | undefined;
+    try {
+        iconUrl = channel ? IconUtils.getChannelIconURL({
             id: channel.id,
             icon: channel.icon,
             applicationId: channel.application_id,
             size: 64,
-        }) : undefined,
+        }) : undefined;
+    } catch (error) {
+        logger.error(`Failed to resolve channel icon ${channelId}`, error);
+    }
+
+    let displayName: string | undefined;
+    try {
+        displayName = getChannelDisplayName(channel);
+    } catch (error) {
+        logger.error(`Failed to resolve channel name ${channelId}`, error);
+    }
+
+    return {
+        id: channelId,
+        name: displayName ?? channelId,
+        iconUrl,
         type: channel?.type,
         guildId: channel?.guild_id,
     };
@@ -334,19 +473,45 @@ function getStatusChanges(previous: VoiceStatusSnapshot | undefined, next: Voice
     ));
 }
 
-function getChannelMembers(channelId?: string | null): ChannelMemberSnapshot[] {
-    if (!settings.store.includeCallMembers || !channelId) return [];
+interface ChannelMembersSnapshot {
+    members: ChannelMemberSnapshot[];
+    total: number;
+    truncated: boolean;
+}
 
-    const channel = ChannelStore.getChannel(channelId) as Channel | undefined;
-    const guildId = channel?.guild_id;
-    const voiceStates = VoiceStateStore.getVoiceStatesForChannel(channelId) as Record<string, VoiceStateUpdate> | undefined;
+function getChannelMembers(channelId?: string | null): ChannelMembersSnapshot {
+    if (!settings.store.includeCallMembers || !channelId) return { members: [], total: 0, truncated: false };
 
-    return Object.values(voiceStates ?? {})
-        .map(voiceState => ({
-            user: getUserSnapshot(voiceState.userId, guildId),
-            voice: getVoiceStatus(voiceState),
-        }))
-        .sort((a, b) => (a.user.name ?? a.user.id).localeCompare(b.user.name ?? b.user.id));
+    try {
+        const channel = ChannelStore.getChannel(channelId) as Channel | undefined;
+        const guildId = channel?.guild_id;
+        const voiceStates = VoiceStateStore.getVoiceStatesForChannel(channelId) as Record<string, VoiceStateUpdate> | undefined;
+        const entries = Object.entries(voiceStates ?? {});
+        const total = entries.length;
+        const maxMembers = Math.max(1, settings.store.maxCallMembers ?? 100);
+
+        // Do not resolve every avatar/profile in a huge channel just to save a diagnostic snapshot.
+        // The exact total is retained, while the UI receives a bounded preview.
+        const members = entries.slice(0, maxMembers)
+            .map(([fallbackUserId, rawVoiceState]) => {
+                const voiceState = normalizeVoiceState({ ...rawVoiceState, userId: rawVoiceState.userId ?? fallbackUserId });
+                if (!voiceState) return null;
+
+                return {
+                    user: getUserSnapshot(voiceState.userId, guildId),
+                    voice: getVoiceStatus(voiceState),
+                };
+            })
+            .filter((member): member is ChannelMemberSnapshot => Boolean(member))
+            .sort((a, b) => (a.user.name ?? a.user.id).localeCompare(b.user.name ?? b.user.id));
+
+        return { members, total, truncated: total > members.length };
+    } catch (error) {
+        // Member previews are optional metadata. Never let a huge/partial channel prevent the
+        // tracked user's core join/move/leave event from being recorded.
+        logger.error(`Failed to snapshot channel members for ${channelId}`, error);
+        return { members: [], total: 0, truncated: false };
+    }
 }
 
 function getEventType(state: VoiceStateUpdate, previousSession?: ActiveVoiceSession): EventType | undefined {
@@ -372,8 +537,18 @@ function buildEvent(state: VoiceStateUpdate, forcedType?: EventType, source: Tra
 
     if (!type) return { event: null, sessionsChanged: false };
 
-    const channel = ChannelStore.getChannel(currentChannelId!) as Channel | undefined;
-    const oldChannel = ChannelStore.getChannel(oldChannelId!) as Channel | undefined;
+    let channel: Channel | undefined;
+    let oldChannel: Channel | undefined;
+    try {
+        channel = currentChannelId ? ChannelStore.getChannel(currentChannelId) as Channel | undefined : undefined;
+    } catch (error) {
+        logger.error(`Failed to resolve current voice channel ${currentChannelId}`, error);
+    }
+    try {
+        oldChannel = oldChannelId ? ChannelStore.getChannel(oldChannelId) as Channel | undefined : undefined;
+    } catch (error) {
+        logger.error(`Failed to resolve previous voice channel ${oldChannelId}`, error);
+    }
     const guildId = state.guildId ?? channel?.guild_id ?? oldChannel?.guild_id ?? previousSession?.guildId;
     const voice = getVoiceStatus(state);
     const changes = getStatusChanges(previousSession?.lastStatus, voice);
@@ -441,6 +616,13 @@ function buildEvent(state: VoiceStateUpdate, forcedType?: EventType, source: Tra
             break;
     }
 
+    const channelMembers = type === "state-update"
+        ? { members: [], total: 0, truncated: false }
+        : getChannelMembers(currentChannelId);
+    const oldChannelMembers = oldChannelId && oldChannelId !== currentChannelId
+        ? getChannelMembers(oldChannelId)
+        : { members: [], total: 0, truncated: false };
+
     const event: TrackedVoiceEvent = {
         id: nanoid(),
         type,
@@ -455,8 +637,12 @@ function buildEvent(state: VoiceStateUpdate, forcedType?: EventType, source: Tra
         previousVoice: previousSession?.lastStatus,
         changes,
         session,
-        channelMembers: getChannelMembers(currentChannelId),
-        oldChannelMembers: oldChannelId && oldChannelId !== currentChannelId ? getChannelMembers(oldChannelId) : [],
+        channelMembers: channelMembers.members,
+        channelMemberCount: channelMembers.total,
+        channelMembersTruncated: channelMembers.truncated,
+        oldChannelMembers: oldChannelMembers.members,
+        oldChannelMemberCount: oldChannelMembers.total,
+        oldChannelMembersTruncated: oldChannelMembers.truncated,
         raw: {
             userId,
             guildId: guildId ?? undefined,
@@ -483,10 +669,13 @@ async function getLogs() {
     return await DataStore.get<TrackedVoiceEvent[]>(LOG_KEY) ?? [];
 }
 
-async function appendLog(event: TrackedVoiceEvent) {
+async function appendLogs(events: TrackedVoiceEvent[]) {
+    if (!events.length) return;
+
     await DataStore.update<TrackedVoiceEvent[]>(LOG_KEY, oldLog => {
         const log = oldLog ?? [];
-        log.unshift(event);
+        // Preserve the event order from the dispatcher while keeping the newest event first.
+        log.unshift(...[...events].reverse());
 
         const { maxEvents } = settings.store;
         if (maxEvents > 0 && log.length > maxEvents) log.length = maxEvents;
@@ -569,18 +758,21 @@ function formatChatEvent(event: TrackedVoiceEvent) {
     const guild = getChannelContextLabel(event.guild, event.channel ?? event.oldChannel);
     const channel = event.channel?.name ?? event.channel?.id;
     const oldChannel = event.oldChannel?.name ?? event.oldChannel?.id;
-    const members = event.channelMembers.length || event.oldChannelMembers.length;
+    const members = (event.channelMemberCount ?? event.channelMembers.length)
+        || (event.oldChannelMemberCount ?? event.oldChannelMembers.length);
+    const membersTruncated = event.channelMembersTruncated || event.oldChannelMembersTruncated;
+    const memberSummary = `${members}${membersTruncated ? " (preview)" : ""}`;
     const duration = formatSessionDuration(event.session);
 
     switch (event.type) {
         case "snapshot":
-            return `[VC Tracker] ${user} is already in ${channel} (${guild}). Status: ${formatStatus(event.voice)}. Members: ${members}.`;
+            return `[VC Tracker] ${user} is already in ${channel} (${guild}). Status: ${formatStatus(event.voice)}. Members: ${memberSummary}.`;
         case "join":
-            return `[VC Tracker] ${user} joined ${channel} (${guild}). Status: ${formatStatus(event.voice)}. Members: ${members}.`;
+            return `[VC Tracker] ${user} joined ${channel} (${guild}). Status: ${formatStatus(event.voice)}. Members: ${memberSummary}.`;
         case "leave":
-            return `[VC Tracker] ${user} left ${oldChannel} (${guild})${duration ? ` after ${duration}` : ""}. Last status: ${formatStatus(event.voice)}. Members left: ${members}.`;
+            return `[VC Tracker] ${user} left ${oldChannel} (${guild})${duration ? ` after ${duration}` : ""}. Last status: ${formatStatus(event.voice)}. Members left: ${memberSummary}.`;
         case "move":
-            return `[VC Tracker] ${user} moved from ${oldChannel} to ${channel} (${guild})${duration ? ` after ${duration}` : ""}. Status: ${formatStatus(event.voice)}. Members: ${members}.`;
+            return `[VC Tracker] ${user} moved from ${oldChannel} to ${channel} (${guild})${duration ? ` after ${duration}` : ""}. Status: ${formatStatus(event.voice)}. Members: ${memberSummary}.`;
         case "state-update":
             return `[VC Tracker] ${user} updated voice status in ${channel} (${guild}): ${event.changes.map(change => `${change.key}: ${String(change.from)} -> ${String(change.to)}`).join(", ")}.`;
     }
@@ -598,39 +790,66 @@ function maybeSendChatSummary(event: TrackedVoiceEvent) {
         : { content: formatChatEvent(event) });
 }
 
-async function handleVoiceStateUpdates(voiceStates: VoiceStateUpdate[]) {
-    const trackedUserIds = getTrackedUserIds();
-    if (!trackedUserIds.length) return;
+async function handleVoiceStateUpdates(rawVoiceStates: unknown) {
+    const trackedUserIds = new Set(getTrackedUserIds());
+    if (!trackedUserIds.size) return;
+
+    const voiceStates = normalizeVoiceStates(rawVoiceStates);
+    if (!voiceStates.length) return;
 
     await loadActiveSessions();
 
     let sessionsChanged = false;
+    const events: TrackedVoiceEvent[] = [];
 
     for (const state of voiceStates) {
-        if (!trackedUserIds.includes(state.userId)) continue;
+        if (!trackedUserIds.has(state.userId)) continue;
 
-        const result = buildEvent(state);
-        if (!result.event) continue;
+        // A live event is authoritative for this user, so a later store reconciliation must not
+        // mistake a short-lived cache gap for a leave.
+        delete missingVoiceStateSince[state.userId];
 
-        sessionsChanged ||= result.sessionsChanged;
-        await appendLog(result.event);
-        maybeSendChatSummary(result.event);
+        try {
+            const result = buildEvent(state);
+            if (!result.event) continue;
+
+            sessionsChanged ||= result.sessionsChanged;
+            events.push(result.event);
+        } catch (error) {
+            // A malformed channel/member/profile must not discard the other tracked users in the
+            // same large-guild batch.
+            logger.error(`Failed to build voice event for ${state.userId}`, error);
+        }
+    }
+
+    try {
+        await appendLogs(events);
+    } catch (error) {
+        logger.error("Failed to persist voice state update batch", error);
+    }
+
+    for (const event of events) {
+        try {
+            maybeSendChatSummary(event);
+        } catch (error) {
+            logger.error("Failed to send voice event summary", error);
+        }
     }
 
     if (sessionsChanged) await saveActiveSessions();
 }
 
-function enqueueVoiceStates(voiceStates: VoiceStateUpdate[]) {
+function enqueueVoiceStates(rawVoiceStates: unknown) {
     voiceQueue = voiceQueue
-        .then(() => handleVoiceStateUpdates(voiceStates))
+        .then(() => handleVoiceStateUpdates(rawVoiceStates))
         .catch(error => logger.error("Failed to process voice state update", error));
 }
 
-async function seedCurrentTrackedUsers(showDoneToast = true) {
+async function reconcileCurrentTrackedUsers(showDoneToast = false) {
     const trackedUserIds = getTrackedUserIds();
     if (!trackedUserIds.length) {
         if (showDoneToast) showToast("No tracked User IDs configured", Toasts.Type.FAILURE);
-        return;
+        return 0;
     }
 
     await loadActiveSessions();
@@ -643,50 +862,129 @@ async function seedCurrentTrackedUsers(showDoneToast = true) {
         if (trackedUserIdSet.has(userId)) continue;
         delete activeSessions[userId];
         sessionsChanged = true;
+        delete missingVoiceStateSince[userId];
     }
 
-    const currentStates = new Map(
-        trackedUserIds.map(userId => [userId, VoiceStateStore.getVoiceStateForUser(userId) as VoiceStateUpdate | undefined])
-    );
+    const events: TrackedVoiceEvent[] = [];
+    const now = Date.now();
 
-    // A user who has a persisted session but no current voice state might just be caught
-    // mid-hydration - recheck once after a delay before treating it as a real leave.
-    const pendingRecheck = trackedUserIds.filter(userId => !currentStates.get(userId)?.channelId && activeSessions[userId]);
+    for (const userId of trackedUserIds) {
+        let state: VoiceStateUpdate | null;
+        try {
+            state = normalizeVoiceState(VoiceStateStore?.getVoiceStateForUser?.(userId));
+        } catch (error) {
+            logger.error(`Failed to read the current voice state for ${userId}`, error);
+            continue;
+        }
+        const activeSession = activeSessions[userId];
+        let eventState: VoiceStateUpdate | undefined;
 
-    if (pendingRecheck.length) {
-        await new Promise(resolve => setTimeout(resolve, RECONCILE_RETRY_DELAY_MS));
-        for (const userId of pendingRecheck) {
-            currentStates.set(userId, VoiceStateStore.getVoiceStateForUser(userId) as VoiceStateUpdate | undefined);
+        if (state?.channelId) {
+            delete missingVoiceStateSince[userId];
+            eventState = state;
+        } else if (activeSession) {
+            // Large guilds can temporarily expose an incomplete VoiceStateStore. Keep the open
+            // session through a grace period and only then reconstruct an approximate leave.
+            const missingSince = missingVoiceStateSince[userId] ??= now;
+            if (now - missingSince < VOICE_STATE_MISSING_GRACE_MS) continue;
+
+            eventState = {
+                ...statusToVoiceState(userId, activeSession.lastStatus, undefined, activeSession.guildId),
+                oldChannelId: activeSession.channelId,
+            };
+            delete missingVoiceStateSince[userId];
+        } else {
+            delete missingVoiceStateSince[userId];
+            continue;
+        }
+
+        try {
+            const forceSnapshot = !activeSession && Boolean(eventState.channelId);
+            const result = buildEvent(eventState, forceSnapshot ? "snapshot" : undefined, "reconciled");
+
+            if (!result.event) continue;
+
+            count++;
+            sessionsChanged ||= result.sessionsChanged;
+            events.push(result.event);
+        } catch (error) {
+            logger.error(`Failed to reconcile voice state for ${userId}`, error);
         }
     }
 
-    for (const userId of trackedUserIds) {
-        const state = currentStates.get(userId);
-        const activeSession = activeSessions[userId];
-        const eventState = state?.channelId
-            ? state
-            : activeSession
-                ? {
-                    ...statusToVoiceState(userId, activeSession.lastStatus, undefined, activeSession.guildId),
-                    oldChannelId: activeSession.channelId,
-                }
-                : undefined;
+    try {
+        await appendLogs(events);
+    } catch (error) {
+        logger.error("Failed to persist reconciled voice state batch", error);
+    }
 
-        if (!eventState) continue;
-
-        const forceSnapshot = !activeSession && Boolean(eventState.channelId);
-        const result = buildEvent(eventState, forceSnapshot ? "snapshot" : undefined, "reconciled");
-
-        if (!result.event) continue;
-
-        count++;
-        sessionsChanged ||= result.sessionsChanged;
-        await appendLog(result.event);
-        maybeSendChatSummary(result.event);
+    for (const event of events) {
+        try {
+            maybeSendChatSummary(event);
+        } catch (error) {
+            logger.error("Failed to send reconciled voice event summary", error);
+        }
     }
 
     if (sessionsChanged) await saveActiveSessions();
     if (showDoneToast) showToast(`Captured ${count} current voice state${count === 1 ? "" : "s"}`, Toasts.Type.SUCCESS);
+    return count;
+}
+
+function enqueueCurrentStateReconciliation(showDoneToast = false) {
+    voiceQueue = voiceQueue
+        .then(async () => {
+            await reconcileCurrentTrackedUsers(showDoneToast);
+        })
+        .catch(error => logger.error("Failed to reconcile tracked voice states", error));
+}
+
+function scheduleVoiceReconciliation(delayMs = VOICE_RECONCILE_DEBOUNCE_MS) {
+    if (!trackerReady || voiceReconcileTimer != null) return;
+
+    voiceReconcileTimer = setTimeout(() => {
+        voiceReconcileTimer = undefined;
+        enqueueCurrentStateReconciliation();
+    }, Math.max(0, delayMs));
+}
+
+function startVoiceReconciliation() {
+    trackerReady = true;
+
+    if (!voiceStoreListener && VoiceStateStore?.addChangeListener) {
+        voiceStoreListener = () => scheduleVoiceReconciliation();
+        VoiceStateStore.addChangeListener(voiceStoreListener);
+    }
+
+    if (voiceReconcileInterval == null) {
+        voiceReconcileInterval = setInterval(() => scheduleVoiceReconciliation(0), VOICE_RECONCILE_INTERVAL_MS);
+    }
+
+    // Run immediately, then retry after the store has had time to hydrate a large guild.
+    scheduleVoiceReconciliation(0);
+    voiceBootstrapTimers = [RECONCILE_RETRY_DELAY_MS, 10_000]
+        .map(delay => setTimeout(() => scheduleVoiceReconciliation(0), delay));
+}
+
+function stopVoiceReconciliation() {
+    trackerReady = false;
+
+    if (voiceReconcileTimer != null) {
+        clearTimeout(voiceReconcileTimer);
+        voiceReconcileTimer = undefined;
+    }
+    if (voiceReconcileInterval != null) {
+        clearInterval(voiceReconcileInterval);
+        voiceReconcileInterval = undefined;
+    }
+    for (const timer of voiceBootstrapTimers) clearTimeout(timer);
+    voiceBootstrapTimers = [];
+    if (voiceStoreListener) {
+        VoiceStateStore?.removeChangeListener?.(voiceStoreListener);
+        voiceStoreListener = undefined;
+    }
+
+    for (const userId of Object.keys(missingVoiceStateSince)) delete missingVoiceStateSince[userId];
 }
 
 function useTrackerLogs() {
@@ -805,11 +1103,11 @@ function StatusIconRow({ voice }: { voice: VoiceStatusSnapshot; }) {
     );
 }
 
-function MembersPreview({ members }: { members: ChannelMemberSnapshot[]; }) {
+function MembersPreview({ members, totalCount = members.length }: { members: ChannelMemberSnapshot[]; totalCount?: number; }) {
     if (!members.length) return null;
 
     const visibleMembers = members.slice(0, 12);
-    const extra = members.length - visibleMembers.length;
+    const extra = Math.max(0, totalCount - visibleMembers.length);
 
     return (
         <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
@@ -837,6 +1135,9 @@ function MembersPreview({ members }: { members: ChannelMemberSnapshot[]; }) {
 function EventRow({ event }: { event: TrackedVoiceEvent; }) {
     const meta = eventMeta[event.type];
     const members = event.channelMembers.length ? event.channelMembers : event.oldChannelMembers;
+    const memberCount = event.channelMembers.length
+        ? event.channelMemberCount ?? event.channelMembers.length
+        : event.oldChannelMemberCount ?? event.oldChannelMembers.length;
 
     return (
         <div
@@ -889,7 +1190,7 @@ function EventRow({ event }: { event: TrackedVoiceEvent; }) {
                 )}
 
                 <div style={{ marginTop: 8 }}>
-                    <MembersPreview members={members} />
+                    <MembersPreview members={members} totalCount={memberCount} />
                 </div>
             </div>
         </div>
@@ -948,7 +1249,7 @@ function SettingsAboutComponent() {
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <Button onClick={openTrackerLogModal}>Open Visual Log</Button>
                 <Button onClick={copyLogs} disabled={!logs.length}>Copy JSON</Button>
-                <Button onClick={() => void seedCurrentTrackedUsers()}>Capture Current State</Button>
+                <Button onClick={() => enqueueCurrentStateReconciliation(true)}>Capture Current State</Button>
                 <Button onClick={openClearLogsConfirm} disabled={!logs.length}>Clear History</Button>
             </div>
         </div>
@@ -965,13 +1266,37 @@ export default definePlugin({
     settings,
 
     flux: {
-        VOICE_STATE_UPDATES({ voiceStates }: { voiceStates: VoiceStateUpdate[]; }) {
+        VOICE_STATE_UPDATES({ voiceStates }: { voiceStates?: unknown; }) {
             enqueueVoiceStates(voiceStates);
+            scheduleVoiceReconciliation();
+        },
+        CONNECTION_OPEN() {
+            scheduleVoiceReconciliation(RECONCILE_RETRY_DELAY_MS);
+        },
+        CONNECTION_RESUMED() {
+            scheduleVoiceReconciliation(RECONCILE_RETRY_DELAY_MS);
+        },
+        GUILD_CREATE() {
+            scheduleVoiceReconciliation(RECONCILE_RETRY_DELAY_MS);
         },
     },
 
     start() {
-        void seedCurrentTrackedUsers(false);
+        const lifecycle = ++trackerLifecycle;
+        voiceQueue = voiceQueue
+            .then(async () => {
+                try {
+                    await reconcileCurrentTrackedUsers(false);
+                } finally {
+                    if (lifecycle === trackerLifecycle) startVoiceReconciliation();
+                }
+            })
+            .catch(error => logger.error("Failed to initialize voice tracker", error));
+    },
+
+    stop() {
+        trackerLifecycle++;
+        stopVoiceReconciliation();
     },
 
     settingsAboutComponent: SettingsAboutComponent,

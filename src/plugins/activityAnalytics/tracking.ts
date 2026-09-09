@@ -5,7 +5,8 @@
  */
 
 import * as DataStore from "@api/DataStore";
-import { PresenceStore, VoiceStateStore } from "@webpack/common";
+import { Logger } from "@utils/Logger";
+import { ChannelStore, PresenceStore, VoiceStateStore } from "@webpack/common";
 
 import settings from "./settings";
 import { isFriend } from "./targets";
@@ -20,18 +21,22 @@ const VOICE_CALLS_KEY = "activityAnalytics:voiceCalls:v1";
 /** Long-running sessions get closed and reopened on this cadence so data survives a crash and
  * whole-bucket attribution skew stays bounded. */
 const HEARTBEAT_MS = 30 * 60 * 1000;
+/** Keep an open call through temporary large-guild store gaps before reconstructing a leave. */
+const VOICE_STATE_MISSING_GRACE_MS = 45_000;
 
 const DEFAULT_MESSAGE_LIMIT = 1000;
 /** Per-user cap on stored voice-call log entries (kept fixed; message history is user-configurable). */
 const VOICE_CALL_LIMIT = 300;
 
 const VALID_PRESENCE: readonly PresenceState[] = ["online", "idle", "dnd", "offline"];
+const logger = new Logger("ActivityAnalyticsTracking");
 
 const aggregates = new Map<string, UserAggregate>();
 const summaries = new Map<string, UserSummary>();
 const openSessions: OpenSessions = { presence: {}, voice: {} };
 const messagesByUser = new Map<string, TrackedMessage[]>();
 const voiceCallsByUser = new Map<string, TrackedVoiceCall[]>();
+const missingVoiceStateSince: Record<string, number> = {};
 
 let loaded = false;
 let persistQueued = false;
@@ -104,7 +109,6 @@ function addToBucket(userId: string, ts: number, field: keyof ActivityBucket, am
 
     getOrCreateSummary(userId);
     bumpVersion();
-    queuePersist();
 }
 
 function queuePersist() {
@@ -228,10 +232,15 @@ function closeVoiceSession(userId: string, endTs: number, opts?: { logCall?: boo
 export function onVoiceStateUpdate(userId: string, channelId: string | null | undefined, guildId?: string | null) {
     const open = openSessions.voice[userId];
 
+    // Undefined means the source did not provide a channel field. Treating that as a leave would
+    // turn partial large-guild payloads into false exits; null is the explicit disconnect value.
+    if (channelId === undefined) return;
+
     if (channelId) {
         if (!open) {
             const now = Date.now();
             openSessions.voice[userId] = { userId, channelId, guildId: guildId ?? undefined, startedAt: now, callStartedAt: now };
+            bumpVersion();
             queuePersist();
         } else if (open.channelId !== channelId) {
             // Moved channels: close the log entry for the old channel and start a fresh call segment.
@@ -250,11 +259,18 @@ export function onVoiceStateUpdate(userId: string, channelId: string | null | un
             open.channelId = channelId;
             open.guildId = guildId ?? undefined;
             open.callStartedAt = now;
+            delete missingVoiceStateSince[userId];
+            bumpVersion();
+            queuePersist();
+        } else if (guildId && !open.guildId) {
+            open.guildId = guildId;
             queuePersist();
         }
+        delete missingVoiceStateSince[userId];
         return;
     }
 
+    delete missingVoiceStateSince[userId];
     closeVoiceSession(userId, Date.now());
 }
 
@@ -290,15 +306,55 @@ function appendVoiceCall(userId: string, call: TrackedVoiceCall) {
     queuePersist();
 }
 
-/** Reconciles persisted voice sessions against live voice state after a reconnect, in case a leave was missed. */
-export function reconcileOpenSessions() {
+/**
+ * Compares every tracked user with VoiceStateStore. This is the recovery path for a missed
+ * VOICE_STATE_UPDATES dispatch, a cold-start hydration race, or a reconnect in a large guild.
+ */
+export function reconcileTrackedVoiceSessions(trackedIds: Set<string>) {
+    if (!VoiceStateStore?.getVoiceStateForUser) return;
+
     const now = Date.now();
-    for (const userId of Object.keys(openSessions.voice)) {
-        const state = VoiceStateStore.getVoiceStateForUser?.(userId);
-        // They left while we were away; log the call but flag its end time as approximate.
-        if (!state?.channelId) closeVoiceSession(userId, now, { approximate: true });
+    for (const userId of trackedIds) {
+        try {
+            const state = VoiceStateStore.getVoiceStateForUser(userId);
+            if (state?.channelId) {
+                let { guildId } = state;
+                if (!guildId) {
+                    try {
+                        const { guild_id: channelGuildId } = ChannelStore?.getChannel?.(state.channelId) ?? {};
+                        guildId = channelGuildId;
+                    } catch (error) {
+                        logger.warn(`Could not resolve the guild for voice channel ${state.channelId}`, error);
+                    }
+                }
+                onVoiceStateUpdate(userId, state.channelId, guildId);
+                continue;
+            }
+
+            const open = openSessions.voice[userId];
+            if (!open) {
+                delete missingVoiceStateSince[userId];
+                continue;
+            }
+
+            // A large guild can briefly return no state while its voice cache is being rebuilt. Keep
+            // the session alive through a grace period instead of fabricating an immediate leave.
+            const missingSince = missingVoiceStateSince[userId] ??= now;
+            if (now - missingSince < VOICE_STATE_MISSING_GRACE_MS) continue;
+
+            delete missingVoiceStateSince[userId];
+            closeVoiceSession(userId, now, { approximate: true });
+        } catch (error) {
+            // One stale user/channel record must not prevent the rest of a large tracked set from
+            // being reconciled in the same pass.
+            logger.error(`Failed to reconcile voice state for ${userId}`, error);
+        }
     }
-    queuePersist();
+}
+
+/** Backwards-compatible helper for reconnect callers that only have persisted open sessions. */
+export function reconcileOpenSessions() {
+    reconcileTrackedVoiceSessions(new Set(Object.keys(openSessions.voice)));
 }
 
 /** Drops (without crediting) open sessions for users no longer tracked. Their intervening presence/voice
@@ -314,6 +370,7 @@ export function pruneUntrackedSessions(trackedIds: Set<string>) {
     for (const userId of Object.keys(openSessions.voice)) {
         if (trackedIds.has(userId)) continue;
         delete openSessions.voice[userId];
+        delete missingVoiceStateSince[userId];
         changed = true;
     }
     if (changed) queuePersist();
@@ -388,6 +445,7 @@ export function resetTrackingState() {
     voiceCallsByUser.clear();
     openSessions.presence = {};
     openSessions.voice = {};
+    for (const userId of Object.keys(missingVoiceStateSince)) delete missingVoiceStateSince[userId];
     loaded = false;
     persistQueued = false;
     if (persistTimer != null) {
