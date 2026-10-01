@@ -17,8 +17,11 @@
 */
 
 import { app } from "electron";
-import { copyFileSync, existsSync, readdirSync, readFileSync, renameSync, statSync } from "original-fs";
+import EventEmitter from "events";
+import { copyFileSync, existsSync, readdirSync, renameSync } from "original-fs";
 import { basename, dirname, join } from "path";
+
+import { isVencordBootstrap } from "./utils/isVencordBootstrap";
 
 function isNewer($new: string, old: string) {
     const newParts = $new.slice(4).split(".").map(Number);
@@ -29,19 +32,6 @@ function isNewer($new: string, old: string) {
         if (newParts[i] < oldParts[i]) return false;
     }
     return false;
-}
-
-function isVencordBootstrap(file: string) {
-    try {
-        // Installer-generated app.asar files are tiny archives whose payload contains the
-        // absolute path to a Vencord patcher. Never treat one as Discord's original app.asar.
-        const stat = statSync(file);
-        if (!stat.isFile() || stat.size > 64 * 1024) return false;
-
-        return readFileSync(file).includes(Buffer.from("patcher.js"));
-    } catch {
-        return false;
-    }
 }
 
 function patchLatest() {
@@ -73,7 +63,7 @@ function patchLatest() {
         // a dev build is injected while an older/global Vencord instance is still running: its
         // before-quit auto-patcher sees the freshly-patched app.asar and would otherwise wrap it
         // a second time, losing the real Discord backup and crashing on duplicate IPC handlers.
-        if (existsSync(newAppAsarBackup) || isVencordBootstrap(newAppAsar)) {
+        if (isVencordBootstrap(newAppAsar)) {
             console.warn("[Vencord] Host update is already patched by another Vencord instance; skipping nested auto-patch");
             return;
         }
@@ -87,6 +77,18 @@ function patchLatest() {
     }
 }
 
-// Try to patch latest on before-quit
-// Discord's Win32 updater will call app.quit() on restart and open new version on will-quit
-app.on("before-quit", patchLatest);
+if (process.platform === "win32" || process.platform === "linux") {
+    EventEmitter.prototype.emit = new Proxy(EventEmitter.prototype.emit, {
+        apply(target, thisArg, argArray) {
+            if (argArray[0] === "host-updated") {
+                patchLatest();
+            }
+
+            return Reflect.apply(target, thisArg, argArray);
+        },
+    });
+
+    // Try to patch latest on before-quit
+    // Discord's Win32 updater will call app.quit() on restart and open new version on will-quit
+    app.on("before-quit", patchLatest);
+}
