@@ -13,14 +13,33 @@ permissions:
     contents: write
     pull-requests: write
 
+concurrency:
+    group: sync-upstream-main
+    cancel-in-progress: false
+
 jobs:
     sync:
+        if: github.ref == 'refs/heads/main'
         runs-on: ubuntu-latest
+        env:
+            GH_REPO: ${{ github.repository }}
+            GH_TOKEN: ${{ github.token }}
         steps:
+            - name: Verificar chave de sincronização
+              env:
+                  SYNC_SSH_KEY_CONFIGURED: ${{ secrets.UPSTREAM_SYNC_SSH_KEY != '' }}
+              run: |
+                  if [[ "$SYNC_SSH_KEY_CONFIGURED" != true ]]; then
+                      echo "::error::Configure UPSTREAM_SYNC_SSH_KEY com uma deploy key de escrita exclusiva deste fork para sincronizar também mudanças em workflows."
+                      exit 1
+                  fi
+
             - name: Checkout do fork
-              uses: actions/checkout@v4
+              uses: actions/checkout@v7
               with:
                   fetch-depth: 0
+                  ref: main
+                  ssh-key: ${{ secrets.UPSTREAM_SYNC_SSH_KEY }}
 
             - name: Configurar identidade do git
               run: |
@@ -32,32 +51,6 @@ jobs:
                   git remote add upstream https://github.com/Vendicated/Vencord.git
                   git fetch upstream main
 
-            - name: Tentar merge de upstream/main
-              id: merge
-              run: |
-                  if git merge --no-edit upstream/main; then
-                      echo "status=clean" >> "$GITHUB_OUTPUT"
-                  else
-                      git merge --abort
-                      echo "status=conflict" >> "$GITHUB_OUTPUT"
-                  fi
-
-            - name: Push do merge (sem conflitos)
-              if: steps.merge.outputs.status == 'clean'
-              run: git push origin main
-
-            - name: Abrir PR pra resolver na mão (conflitos)
-              if: steps.merge.outputs.status == 'conflict'
-              env:
-                  GH_TOKEN: ${{ github.token }}
-              run: |
-                  git push -f origin upstream/main:refs/heads/sync/upstream
-                  gh pr create \
-                      --base main \
-                      --head sync/upstream \
-                      --title "Sync upstream Vencord (conflitos - resolver manualmente)" \
-                      --body "O merge automático de \`Vendicated:main\` conflitou com as suas modificações. Resolva os conflitos por aqui e faça merge." \
-                      || gh pr view sync/upstream >/dev/null || {
-                          echo "::error::Merge conflitou com upstream/main e não foi possível abrir nem encontrar um PR (verifique Settings > Actions > 'Allow GitHub Actions to create pull requests'). A branch sync/upstream foi atualizada, resolva manualmente."
-                          exit 1
-                      }
+            - name: Sincronizar upstream
+              id: sync
+              run: bash scripts/sync-upstream.sh

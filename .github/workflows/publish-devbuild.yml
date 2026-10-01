@@ -28,52 +28,96 @@ on:
     workflow_run:
         workflows: ["Sync upstream Vencord"]
         types: [completed]
+        branches: [main]
     workflow_dispatch: {}
 
 permissions:
     contents: write
 
+concurrency:
+    group: publish-devbuild
+    cancel-in-progress: false
+
 jobs:
     Publish:
+        if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
         runs-on: ubuntu-latest
+        env:
+            GH_REPO: ${{ github.repository }}
+            GH_TOKEN: ${{ github.token }}
         steps:
             - uses: actions/checkout@v7
               with:
                   fetch-depth: 0
+                  ref: main
+
+            - name: Preparar publicação
+              id: vars
+              run: |
+                  set -euo pipefail
+                  commit=$(git rev-parse HEAD)
+                  hash=$(git rev-parse --short HEAD)
+                  echo "commit=$commit" >> "$GITHUB_OUTPUT"
+                  echo "hash=$hash" >> "$GITHUB_OUTPUT"
+
+                  release_state=$(gh api --method GET --paginate "repos/$GH_REPO/releases?per_page=100" \
+                      --jq '.[] | select(.tag_name == "devbuild") | "exists|\(.draft)|\(.name)"')
+                  if [[ "$release_state" == "exists|false|DevBuild $hash" ]]; then
+                      echo "publish=false" >> "$GITHUB_OUTPUT"
+                      echo "DevBuild $hash já está publicado."
+                      exit 0
+                  fi
+
+                  if [[ -n "$release_state" ]]; then
+                      echo "release_exists=true" >> "$GITHUB_OUTPUT"
+                  else
+                      echo "release_exists=false" >> "$GITHUB_OUTPUT"
+                  fi
+                  echo "publish=true" >> "$GITHUB_OUTPUT"
 
             - uses: pnpm/action-setup@v6 # usa a versao do packageManager no package.json
+              if: steps.vars.outputs.publish == 'true'
 
             - name: Use Node.js 24
+              if: steps.vars.outputs.publish == 'true'
               uses: actions/setup-node@v6
               with:
                   node-version: 24
                   cache: "pnpm"
 
             - name: Instalar dependencias
+              if: steps.vars.outputs.publish == 'true'
               run: pnpm install --frozen-lockfile
 
             - name: Build standalone
+              if: steps.vars.outputs.publish == 'true'
               run: pnpm build --standalone
 
-            - name: Hash curto do commit
-              id: vars
-              run: echo "hash=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-
             - name: Publicar release "devbuild"
+              if: steps.vars.outputs.publish == 'true'
               env:
-                  GH_TOKEN: ${{ github.token }}
+                  BUILD_COMMIT: ${{ steps.vars.outputs.commit }}
+                  BUILD_HASH: ${{ steps.vars.outputs.hash }}
+                  RELEASE_EXISTS: ${{ steps.vars.outputs.release_exists }}
               run: |
+                  set -euo pipefail
+                  current_main=$(gh api --method GET "repos/$GH_REPO/git/ref/heads/main" --jq '.object.sha')
+                  if [[ "$current_main" != "$BUILD_COMMIT" ]]; then
+                      echo "main avançou durante o build; publicação obsoleta ignorada."
+                      exit 0
+                  fi
+
                   # cria o release "devbuild" na primeira vez
-                  if ! gh release view devbuild >/dev/null 2>&1; then
-                      gh release create devbuild \
-                          --title "DevBuild ${{ steps.vars.outputs.hash }}" \
+                  if [[ "$RELEASE_EXISTS" != true ]]; then
+                      gh release create devbuild --repo "$GH_REPO" --draft \
+                          --title "DevBuild em publicação" \
                           --notes "Build automatico do fork. Instalacoes standalone se atualizam por aqui." \
-                          --target main
+                          --target "$BUILD_COMMIT"
                   fi
 
                   # sobe os arquivos prontos (Discord desktop + Vesktop) e os
                   # instaladores pros amigos, sobrescrevendo
-                  gh release upload devbuild --clobber \
+                  gh release upload devbuild --repo "$GH_REPO" --clobber \
                       dist/patcher.js \
                       dist/preload.js \
                       dist/renderer.js \
@@ -88,6 +132,6 @@ jobs:
                       scripts/installFork.command
 
                   # o titulo PRECISA terminar com o hash - e o que o updater compara
-                  gh release edit devbuild \
-                      --title "DevBuild ${{ steps.vars.outputs.hash }}" \
-                      --latest
+                  gh release edit devbuild --repo "$GH_REPO" \
+                      --title "DevBuild $BUILD_HASH" \
+                      --draft=false --latest
