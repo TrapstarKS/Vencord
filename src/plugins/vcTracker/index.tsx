@@ -15,7 +15,7 @@ import { useAwaiter } from "@utils/react";
 import definePlugin, { OptionType, ReporterTestable } from "@utils/types";
 import type { Channel, RenderModalProps, User } from "@vencord/discord-types";
 import { ChannelType } from "@vencord/discord-types/enums";
-import { Button, ChannelStore, ConfirmModal, Forms, GuildMemberStore, GuildStore, IconUtils, Modal, openModal, ScrollerThin, SelectedChannelStore, showToast, Timestamp, Toasts, useEffect, useReducer, UserStore, VoiceStateStore } from "@webpack/common";
+import { Button, ChannelStore, ConfirmModal, Forms, GuildMemberStore, GuildStore, IconUtils, Modal, openModal, ScrollerThin, SelectedChannelStore, showToast, Timestamp, useEffect, useReducer, UserStore, VoiceStateStore } from "@webpack/common";
 import { nanoid } from "nanoid";
 import type { JSX, KeyboardEvent } from "react";
 
@@ -689,7 +689,7 @@ async function appendLogs(events: TrackedVoiceEvent[]) {
 async function clearLogs() {
     await DataStore.set(LOG_KEY, []);
     emitLogUpdate();
-    showToast("VC Tracker history cleared", Toasts.Type.SUCCESS);
+    showToast("VC Tracker history cleared", "success");
 }
 
 async function copyLogs() {
@@ -848,7 +848,7 @@ function enqueueVoiceStates(rawVoiceStates: unknown) {
 async function reconcileCurrentTrackedUsers(showDoneToast = false) {
     const trackedUserIds = getTrackedUserIds();
     if (!trackedUserIds.length) {
-        if (showDoneToast) showToast("No tracked User IDs configured", Toasts.Type.FAILURE);
+        if (showDoneToast) showToast("No tracked User IDs configured", "failure");
         return 0;
     }
 
@@ -927,7 +927,7 @@ async function reconcileCurrentTrackedUsers(showDoneToast = false) {
     }
 
     if (sessionsChanged) await saveActiveSessions();
-    if (showDoneToast) showToast(`Captured ${count} current voice state${count === 1 ? "" : "s"}`, Toasts.Type.SUCCESS);
+    if (showDoneToast) showToast(`Captured ${count} current voice state${count === 1 ? "" : "s"}`, "success");
     return count;
 }
 

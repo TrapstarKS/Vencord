@@ -8,7 +8,7 @@ import { MessageObject } from "@api/MessageEvents";
 import { definePluginSettings } from "@api/Settings";
 import { Devs } from "@utils/constants";
 import definePlugin, { OptionType } from "@utils/types";
-import { showToast, Toasts } from "@webpack/common";
+import { showToast } from "@webpack/common";
 
 // Zero-width / invisible / bidi-control / soft-hyphen code points commonly used for
 // fingerprinting, hidden watermarking or invisible-ink tricks. Built from an ASCII
@@ -128,7 +128,7 @@ function sanitize(msg: MessageObject) {
     }
 
     if (report.length && settings.store.showSummary) {
-        showToast(`ClipboardSanitizer: ${report.join(", ")}`, Toasts.Type.SUCCESS);
+        showToast(`ClipboardSanitizer: ${report.join(", ")}`, "success");
     }
 }
 

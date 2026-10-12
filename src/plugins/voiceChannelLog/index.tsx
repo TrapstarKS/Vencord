@@ -9,7 +9,7 @@ import "./style.css";
 import { definePluginSettings } from "@api/Settings";
 import { Devs } from "@utils/constants";
 import definePlugin, { OptionType } from "@utils/types";
-import { ChannelStore, GuildStore, Modal, openModal, RTCConnectionStore, showToast, Text, Toasts, useEffect, UserStore, useState } from "@webpack/common";
+import { ChannelStore, GuildStore, Modal, openModal, RTCConnectionStore, showToast, Text, useEffect, UserStore, useState } from "@webpack/common";
 
 type EventType = "join" | "leave" | "move-in" | "move-out";
 
@@ -110,9 +110,9 @@ function handleUpdate(state: { userId: string; channelId?: string | null; oldCha
 
     const { text } = describe(type);
     if ((type === "leave" || type === "move-out") && settings.store.notifyLeaves)
-        showToast(`${user?.globalName || user?.username || "Someone"} ${text}`, Toasts.Type.MESSAGE);
+        showToast(`${user?.globalName || user?.username || "Someone"} ${text}`, "message");
     else if ((type === "join" || type === "move-in") && settings.store.notifyJoins)
-        showToast(`${user?.globalName || user?.username || "Someone"} ${text}`, Toasts.Type.SUCCESS);
+        showToast(`${user?.globalName || user?.username || "Someone"} ${text}`, "success");
 }
 
 function LogModal({ modalProps }: { modalProps: any; }) {

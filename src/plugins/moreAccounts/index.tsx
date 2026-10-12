@@ -12,7 +12,7 @@ import { Devs } from "@utils/constants";
 import { Logger } from "@utils/Logger";
 import definePlugin, { OptionType } from "@utils/types";
 import { findByPropsLazy } from "@webpack";
-import { Button, Forms, React, RestAPI, TextArea, Toasts, UserStore, useState } from "@webpack/common";
+import { Button, Forms, React, RestAPI, showToast, TextArea, UserStore, useState } from "@webpack/common";
 
 import {
     addAccountsFromInput,
@@ -198,11 +198,7 @@ function AddTokenSection() {
                 setMessage({
                     text: `${result.messages.join(" ")}${vaultPart}`
                 });
-                Toasts.show({
-                    message: `Logged in and saved to vault (${result.added}).`,
-                    id: Toasts.genId(),
-                    type: Toasts.Type.SUCCESS
-                });
+                showToast(`Logged in and saved to vault (${result.added}).`, "success");
                 return;
             }
 
@@ -231,11 +227,7 @@ function AddTokenSection() {
             setMessage({
                 text: `${result.messages.join(" ")} Create a vault below if you want an encrypted backup.`
             });
-            Toasts.show({
-                message: `Logged in ${result.added} account${result.added === 1 ? "" : "s"}.`,
-                id: Toasts.genId(),
-                type: Toasts.Type.SUCCESS
-            });
+            showToast(`Logged in ${result.added} account${result.added === 1 ? "" : "s"}.`, "success");
         } catch {
             setMessage({ text: "Login failed, check the console.", error: true });
         } finally {
@@ -331,21 +323,13 @@ const settings = definePluginSettings({
 function notifyRestoreResult(r: Awaited<ReturnType<typeof restoreHiddenAccounts>>) {
     if (!r.added) return;
 
-    Toasts.show({
-        message: `MoreAccounts restored ${r.added} account${r.added === 1 ? "" : "s"}.`,
-        id: Toasts.genId(),
-        type: r.expired ? Toasts.Type.MESSAGE : Toasts.Type.SUCCESS
-    });
+    showToast(`MoreAccounts restored ${r.added} account${r.added === 1 ? "" : "s"}.`, r.expired ? "message" : "success");
 }
 
 function notifyVaultSyncResult(r: Awaited<ReturnType<typeof syncVaultFromDiscord>>) {
     if (!r.added) return;
 
-    Toasts.show({
-        message: `Saved ${r.added} new account${r.added === 1 ? "" : "s"} to the vault.`,
-        id: Toasts.genId(),
-        type: Toasts.Type.SUCCESS
-    });
+    showToast(`Saved ${r.added} new account${r.added === 1 ? "" : "s"} to the vault.`, "success");
 }
 
 function scheduleAutoRestore(delay = 1500) {
@@ -685,11 +669,7 @@ async function preserveAccountOnSoftLogout(userId: string, token: string | null)
         if (now - last < 2000) return;
         softLogoutToastAt.set(userId, now);
 
-        Toasts.show({
-            message: "Could not keep token after logout — check the vault.",
-            id: Toasts.genId(),
-            type: Toasts.Type.FAILURE
-        });
+        showToast("Could not keep token after logout — check the vault.", "failure");
     }, 50);
 }
 

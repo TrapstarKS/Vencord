@@ -14,7 +14,7 @@ import { openUserProfile } from "@utils/discord";
 import definePlugin, { OptionType } from "@utils/types";
 import { Channel } from "@vencord/discord-types";
 import { findByPropsLazy } from "@webpack";
-import { Alerts, ChannelRouter, ChannelRTCStore, ChannelStore, Parser, PermissionsBits, PermissionStore, Popout, showToast, Text, Toasts, useMemo, useRef, UserStore, useState, useStateFromStores, VoiceStateStore } from "@webpack/common";
+import { Alerts, ChannelRouter, ChannelRTCStore, ChannelStore, Parser, PermissionsBits, PermissionStore, Popout, showToast, Text, useMemo, useRef, UserStore, useState, useStateFromStores, VoiceStateStore } from "@webpack/common";
 import type { MouseEvent } from "react";
 
 const { selectVoiceChannel } = findByPropsLazy("selectVoiceChannel", "selectChannel");
@@ -142,7 +142,7 @@ function VoiceCard({ channel }: { channel: Channel; }) {
     const goToChannel = () => ChannelRouter.transitionToChannel(channel.id);
     const joinChannel = () => {
         if (!isDM && !PermissionStore.can(PermissionsBits.CONNECT, channel)) {
-            showToast("You cannot join this voice channel", Toasts.Type.FAILURE);
+            showToast("You cannot join this voice channel", "failure");
             return;
         }
         Alerts.show({

@@ -8,7 +8,7 @@ import { Settings } from "@api/Settings";
 import { Flex } from "@components/Flex";
 import { copyWithToast } from "@utils/discord";
 import { chooseFile, saveFile } from "@utils/web";
-import { Button, ConfirmModal, Forms, openModal, React, TextInput, Toasts, useState } from "@webpack/common";
+import { Button, ConfirmModal, Forms, openModal, React, showToast, TextInput, useState } from "@webpack/common";
 
 import {
     type AccountSessionStatus,
@@ -159,11 +159,7 @@ function AccountCard({ account: rawAccount, busy, onRestore, onSwitch, onRemove,
     function handleCopyToken() {
         const token = getUnlockedVaultToken(account.id);
         if (!token) {
-            Toasts.show({
-                message: "This account has no valid token stored (garbage entry — try Lock/Unlock to scrub).",
-                id: Toasts.genId(),
-                type: Toasts.Type.FAILURE
-            });
+            showToast("This account has no valid token stored (garbage entry — try Lock/Unlock to scrub).", "failure");
             return;
         }
         void copyWithToast(token, "Token copied.");

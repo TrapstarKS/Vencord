@@ -10,7 +10,7 @@ import { RestartIcon } from "@components/Icons";
 import { Devs } from "@utils/constants";
 import definePlugin, { OptionType } from "@utils/types";
 import type { User } from "@vencord/discord-types";
-import { FluxDispatcher, GuildMemberStore, GuildStore, Menu, PresenceStore, showToast, Toasts, UserProfileStore, UserStore } from "@webpack/common";
+import { FluxDispatcher, GuildMemberStore, GuildStore, Menu, PresenceStore, showToast, UserProfileStore, UserStore } from "@webpack/common";
 
 const CUSTOM_STATUS_ACTIVITY_TYPE = 4;
 
@@ -115,11 +115,11 @@ function forcePresenceUpdate(user: User, contextGuildId?: string) {
     const { status, hasData, text } = getPresenceReport(user.id);
 
     if (status !== "offline") {
-        showToast(`${user.username}: ${text}`, Toasts.Type.SUCCESS);
+        showToast(`${user.username}: ${text}`, "success");
     } else if (hasData) {
-        showToast(`${user.username}: offline (o cliente tem a presença dele e diz offline)`, Toasts.Type.MESSAGE);
+        showToast(`${user.username}: offline (o cliente tem a presença dele e diz offline)`, "message");
     } else {
-        showToast(`${user.username}: sem presença conhecida — não é amigo ou o servidor não assina a presença dele`, Toasts.Type.FAILURE);
+        showToast(`${user.username}: sem presença conhecida — não é amigo ou o servidor não assina a presença dele`, "failure");
     }
 }
 

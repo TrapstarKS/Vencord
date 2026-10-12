@@ -10,7 +10,7 @@ import { copyToClipboard } from "@utils/clipboard";
 import { Devs } from "@utils/constants";
 import definePlugin, { OptionType } from "@utils/types";
 import { Channel, Message } from "@vencord/discord-types";
-import { Menu, showToast, Toasts } from "@webpack/common";
+import { Menu, showToast } from "@webpack/common";
 
 const settings = definePluginSettings({
     includeAuthor: {
@@ -102,9 +102,9 @@ const messageContextMenuPatch: NavContextMenuPatchCallback = (children, { messag
             action={() => {
                 try {
                     copyToClipboard(buildQuote(message, channel));
-                    showToast("Copied message as quote", Toasts.Type.SUCCESS);
+                    showToast("Copied message as quote", "success");
                 } catch {
-                    showToast("Failed to copy quote", Toasts.Type.FAILURE);
+                    showToast("Failed to copy quote", "failure");
                 }
             }}
         />

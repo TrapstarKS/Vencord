@@ -7,7 +7,7 @@
 import "./styles.css";
 
 import { Flex } from "@components/Flex";
-import { Button, ConfirmModal, Forms, openModal, React, SettingsRouter, Toasts, useEffect, useState } from "@webpack/common";
+import { Button, ConfirmModal, Forms, openModal, React, SettingsRouter, showToast, useEffect, useState } from "@webpack/common";
 
 import {
     checkSessions,
@@ -95,19 +95,11 @@ function SessionRow({ session, busy, onChanged }: {
                                 onConfirm={() => {
                                     void logoutSessions([session.idHash])
                                         .then(() => {
-                                            Toasts.show({
-                                                message: "Session logged out.",
-                                                id: Toasts.genId(),
-                                                type: Toasts.Type.SUCCESS
-                                            });
+                                            showToast("Session logged out.", "success");
                                             onChanged();
                                         })
                                         .catch(() => {
-                                            Toasts.show({
-                                                message: "Failed to log out session.",
-                                                id: Toasts.genId(),
-                                                type: Toasts.Type.FAILURE
-                                            });
+                                            showToast("Failed to log out session.", "failure");
                                         });
                                 }}
                             >
@@ -193,11 +185,7 @@ export function SessionGuardDashboard() {
                             try {
                                 SettingsRouter.openUserSettings("sessions_panel");
                             } catch {
-                                Toasts.show({
-                                    message: "Could not open Devices settings.",
-                                    id: Toasts.genId(),
-                                    type: Toasts.Type.FAILURE
-                                });
+                                showToast("Could not open Devices settings.", "failure");
                             }
                         }}
                     >

@@ -5,7 +5,7 @@
  */
 
 import { RenderModalProps } from "@vencord/discord-types";
-import { Forms, Modal, openModal, React, TextInput, Toasts, useState } from "@webpack/common";
+import { Forms, Modal, openModal, React, showToast, TextInput, useState } from "@webpack/common";
 
 import { VaultSourceAccount } from "./accounts";
 import { getVaultAvatarUrl, syncVaultFromDiscord, unlockVault } from "./vault";
@@ -93,13 +93,9 @@ function VaultUnlockDialog({
             const result = await syncVaultFromDiscord();
             const changes = result.added + result.updated;
 
-            Toasts.show({
-                message: changes
+            showToast(changes
                     ? `Vault unlocked · ${result.added} new, ${result.updated} updated account(s) saved.`
-                    : "Vault unlocked.",
-                id: Toasts.genId(),
-                type: Toasts.Type.SUCCESS
-            });
+                    : "Vault unlocked.", "success");
 
             if (markFinished()) onUnlocked?.();
             modalProps.onClose();

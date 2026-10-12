@@ -10,7 +10,7 @@ import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
 import { Flex } from "@components/Flex";
 import { OptionType } from "@utils/types";
-import { Button, ChannelStore, Forms, IconUtils, React, TextInput, Toasts, UserStore, useState } from "@webpack/common";
+import { Button, ChannelStore, Forms, IconUtils, React, showToast, TextInput, UserStore, useState } from "@webpack/common";
 
 export const settings = definePluginSettings({
     whitelistManager: {
@@ -203,11 +203,7 @@ function WhitelistManager() {
     function addUserId() {
         const id = userIdDraft.trim();
         if (!/^\d{5,32}$/.test(id)) {
-            Toasts.show({
-                message: "Enter a valid user ID (snowflake).",
-                id: Toasts.genId(),
-                type: Toasts.Type.FAILURE
-            });
+            showToast("Enter a valid user ID (snowflake).", "failure");
             return;
         }
         if (!getUserWhitelist().includes(id)) {
@@ -220,11 +216,7 @@ function WhitelistManager() {
     function addGroupId() {
         const id = groupIdDraft.trim();
         if (!/^\d{5,32}$/.test(id)) {
-            Toasts.show({
-                message: "Enter a valid group chat channel ID.",
-                id: Toasts.genId(),
-                type: Toasts.Type.FAILURE
-            });
+            showToast("Enter a valid group chat channel ID.", "failure");
             return;
         }
         if (!getGroupChatWhitelist().includes(id)) {
@@ -242,11 +234,7 @@ function WhitelistManager() {
                 ? undefined
                 : settings.store.nativeNotifications as "always" | "not-focused" | "never",
         });
-        Toasts.show({
-            message: "Test notification sent.",
-            id: Toasts.genId(),
-            type: Toasts.Type.SUCCESS
-        });
+        showToast("Test notification sent.", "success");
     }
 
     return (
