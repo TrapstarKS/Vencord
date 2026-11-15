@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { Forms, showToast } from "@components/ForkCompat";
 import { RenderModalProps } from "@vencord/discord-types";
-import { Forms, Modal, openModal, React, showToast, TextInput, useState } from "@webpack/common";
+import { Modal, openModal, React, TextInput, useState } from "@webpack/common";
 
 import { VaultSourceAccount } from "./accounts";
 import { getVaultAvatarUrl, syncVaultFromDiscord, unlockVault } from "./vault";

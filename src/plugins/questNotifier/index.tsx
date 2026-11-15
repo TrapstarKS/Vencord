@@ -6,12 +6,13 @@
 
 import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
+import { Button, Forms } from "@components/ForkCompat";
 import { Devs } from "@utils/constants";
 import { localStorage } from "@utils/localStorage";
 import definePlugin, { OptionType } from "@utils/types";
 import { FluxStore } from "@vencord/discord-types";
 import { find, findStoreLazy } from "@webpack";
-import { Button, FluxDispatcher, Forms, React, RestAPI, useState } from "@webpack/common";
+import { FluxDispatcher, React, RestAPI, useState } from "@webpack/common";
 
 const STORAGE_KEY = "vc-questNotifier-seen-v1";
 

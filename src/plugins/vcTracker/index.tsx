@@ -7,6 +7,7 @@
 import { sendBotMessage } from "@api/Commands";
 import * as DataStore from "@api/DataStore";
 import { definePluginSettings } from "@api/Settings";
+import { Button, Forms, showToast } from "@components/ForkCompat";
 import { Camera, Deafened, MicrophoneMuted, ScreenshareIcon } from "@components/Icons";
 import { Devs } from "@utils/constants";
 import { copyWithToast, openUserProfile } from "@utils/discord";
@@ -15,8 +16,7 @@ import { useAwaiter } from "@utils/react";
 import definePlugin, { OptionType, ReporterTestable } from "@utils/types";
 import type { Channel, RenderModalProps, User } from "@vencord/discord-types";
 import { ChannelType } from "@vencord/discord-types/enums";
-import { Button, ChannelStore, ConfirmModal, Forms, GuildMemberStore, GuildStore, IconUtils, Modal, openModal, ScrollerThin, SelectedChannelStore, showToast, Timestamp, useEffect, useReducer, UserStore, VoiceStateStore } from "@webpack/common";
-import { nanoid } from "nanoid";
+import { ChannelStore, ConfirmModal, GuildMemberStore, GuildStore, IconUtils, Modal, openModal, ScrollerThin, SelectedChannelStore, Timestamp, useEffect, useReducer, UserStore, VoiceStateStore } from "@webpack/common";
 import type { JSX, KeyboardEvent } from "react";
 
 type EventType = "snapshot" | "join" | "leave" | "move" | "state-update";
@@ -624,7 +624,7 @@ function buildEvent(state: VoiceStateUpdate, forcedType?: EventType, source: Tra
         : { members: [], total: 0, truncated: false };
 
     const event: TrackedVoiceEvent = {
-        id: nanoid(),
+        id: crypto.randomUUID(),
         type,
         source,
         timestamp: now,
@@ -858,7 +858,7 @@ async function reconcileCurrentTrackedUsers(showDoneToast = false) {
     let sessionsChanged = false;
     const trackedUserIdSet = new Set(trackedUserIds);
 
-    for (const [userId, session] of Object.entries(activeSessions)) {
+    for (const userId of Object.keys(activeSessions)) {
         if (trackedUserIdSet.has(userId)) continue;
         delete activeSessions[userId];
         sessionsChanged = true;

@@ -6,9 +6,10 @@
 
 import { Settings } from "@api/Settings";
 import { Flex } from "@components/Flex";
+import { Button, Forms, showToast } from "@components/ForkCompat";
 import { copyWithToast } from "@utils/discord";
 import { chooseFile, saveFile } from "@utils/web";
-import { Button, ConfirmModal, Forms, openModal, React, showToast, TextInput, useState } from "@webpack/common";
+import { ConfirmModal, openModal, React, TextInput, useState } from "@webpack/common";
 
 import {
     type AccountSessionStatus,

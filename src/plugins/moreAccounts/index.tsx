@@ -8,11 +8,12 @@ import "./styles.css";
 
 import { definePluginSettings } from "@api/Settings";
 import { Flex } from "@components/Flex";
+import { Button, Forms, showToast } from "@components/ForkCompat";
 import { Devs } from "@utils/constants";
 import { Logger } from "@utils/Logger";
 import definePlugin, { OptionType } from "@utils/types";
 import { findByPropsLazy } from "@webpack";
-import { Button, Forms, React, RestAPI, showToast, TextArea, UserStore, useState } from "@webpack/common";
+import { React, RestAPI, TextArea, UserStore, useState } from "@webpack/common";
 
 import {
     addAccountsFromInput,

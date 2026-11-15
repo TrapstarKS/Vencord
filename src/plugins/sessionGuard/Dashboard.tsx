@@ -7,7 +7,8 @@
 import "./styles.css";
 
 import { Flex } from "@components/Flex";
-import { Button, ConfirmModal, Forms, openModal, React, SettingsRouter, showToast, useEffect, useState } from "@webpack/common";
+import { Button, Forms, showToast } from "@components/ForkCompat";
+import { ConfirmModal, openModal, React, SettingsRouter, useEffect, useState } from "@webpack/common";
 
 import {
     checkSessions,

@@ -10,9 +10,10 @@ import { ApplicationCommandInputType, ApplicationCommandOptionType, findOption, 
 import * as DataStore from "@api/DataStore";
 import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
+import { Button, Text } from "@components/ForkCompat";
 import { Devs } from "@utils/constants";
 import definePlugin, { OptionType } from "@utils/types";
-import { Button, Modal, openModal, Text, useEffect, useState } from "@webpack/common";
+import { Modal, openModal, useEffect, useState } from "@webpack/common";
 
 interface Reminder {
     id: string;

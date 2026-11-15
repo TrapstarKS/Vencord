@@ -6,11 +6,12 @@
 
 import type { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import { definePluginSettings } from "@api/Settings";
+import { showToast } from "@components/ForkCompat";
 import { RestartIcon } from "@components/Icons";
 import { Devs } from "@utils/constants";
 import definePlugin, { OptionType } from "@utils/types";
 import type { User } from "@vencord/discord-types";
-import { FluxDispatcher, GuildMemberStore, GuildStore, Menu, PresenceStore, showToast, UserProfileStore, UserStore } from "@webpack/common";
+import { FluxDispatcher, GuildMemberStore, GuildStore, Menu, PresenceStore, UserProfileStore, UserStore } from "@webpack/common";
 
 const CUSTOM_STATUS_ACTIVITY_TYPE = 4;
 

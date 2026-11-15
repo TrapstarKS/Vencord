@@ -7,9 +7,10 @@
 import "./styles.css";
 
 import ErrorBoundary from "@components/ErrorBoundary";
+import { Button, Forms } from "@components/ForkCompat";
 import { getUniqueUsername } from "@utils/discord";
 import type { RenderModalProps, User } from "@vencord/discord-types";
-import { Button, ChannelStore, Forms, GuildStore, Modal, NavigationRouter, openModal, Parser, ScrollerThin, Select, TabBar, TextInput, Tooltip, useEffect, useMemo, useReducer, UserStore, UserUtils, useState } from "@webpack/common";
+import { ChannelStore, GuildStore, Modal, NavigationRouter, openModal, Parser, ScrollerThin, Select, TabBar, TextInput, Tooltip, useEffect, useMemo, useReducer, UserStore, UserUtils, useState } from "@webpack/common";
 import type { JSX, ReactNode } from "react";
 
 import { getAggregate, getAllSummaries, getMessages, getVersion, getVoiceCalls, subscribe } from "./tracking";

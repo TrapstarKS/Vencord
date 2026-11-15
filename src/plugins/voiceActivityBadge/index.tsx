@@ -9,12 +9,13 @@ import "./style.css";
 import { addProfileBadge, BadgePosition, ProfileBadge, removeProfileBadge } from "@api/Badges";
 import { addMemberListDecorator, removeMemberListDecorator } from "@api/MemberListDecorators";
 import { definePluginSettings } from "@api/Settings";
+import { showToast, Text } from "@components/ForkCompat";
 import { Devs } from "@utils/constants";
 import { openUserProfile } from "@utils/discord";
 import definePlugin, { OptionType } from "@utils/types";
 import { Channel } from "@vencord/discord-types";
 import { findByPropsLazy } from "@webpack";
-import { Alerts, ChannelRouter, ChannelRTCStore, ChannelStore, Parser, PermissionsBits, PermissionStore, Popout, showToast, Text, useMemo, useRef, UserStore, useState, useStateFromStores, VoiceStateStore } from "@webpack/common";
+import { Alerts, ChannelRouter, ChannelRTCStore, ChannelStore, Parser, PermissionsBits, PermissionStore, Popout, useMemo, useRef, UserStore, useState, useStateFromStores, VoiceStateStore } from "@webpack/common";
 import type { MouseEvent } from "react";
 
 const { selectVoiceChannel } = findByPropsLazy("selectVoiceChannel", "selectChannel");

@@ -6,11 +6,12 @@
 
 import { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import { definePluginSettings } from "@api/Settings";
+import { showToast } from "@components/ForkCompat";
 import { copyToClipboard } from "@utils/clipboard";
 import { Devs } from "@utils/constants";
 import definePlugin, { OptionType } from "@utils/types";
 import { Channel, Message } from "@vencord/discord-types";
-import { Menu, showToast } from "@webpack/common";
+import { Menu } from "@webpack/common";
 
 const settings = definePluginSettings({
     includeAuthor: {

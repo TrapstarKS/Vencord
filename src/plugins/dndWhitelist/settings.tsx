@@ -9,8 +9,9 @@ import "./styles.css";
 import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
 import { Flex } from "@components/Flex";
+import { Button, Forms, showToast } from "@components/ForkCompat";
 import { OptionType } from "@utils/types";
-import { Button, ChannelStore, Forms, IconUtils, React, showToast, TextInput, UserStore, useState } from "@webpack/common";
+import { ChannelStore, IconUtils, React, TextInput, UserStore, useState } from "@webpack/common";
 
 export const settings = definePluginSettings({
     whitelistManager: {

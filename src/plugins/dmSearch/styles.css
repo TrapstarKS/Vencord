@@ -29,7 +29,10 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    transition: color .12s ease, border-color .12s ease, background .12s ease;
+    transition:
+        color 0.12s ease,
+        border-color 0.12s ease,
+        background 0.12s ease;
     font-family: inherit;
     white-space: nowrap;
     flex-shrink: 0;
@@ -333,7 +336,7 @@
     object-fit: cover;
     display: block;
     background: var(--background-secondary);
-    transition: filter .12s ease;
+    transition: filter 0.12s ease;
 }
 
 .vc-dms-media-cell:hover .vc-dms-media-cell-media {
@@ -478,7 +481,9 @@
 }
 
 @keyframes vc-dms-pulse {
-    0%, 60%, 100% {
+    0%,
+    60%,
+    100% {
         opacity: 0.3;
         transform: scale(0.85);
     }
@@ -501,7 +506,7 @@
     font-size: 12px;
     font-weight: 500;
     font-family: inherit;
-    transition: background .12s ease;
+    transition: background 0.12s ease;
 }
 
 .vc-dms-more:hover {

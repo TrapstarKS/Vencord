@@ -7,9 +7,10 @@
 import "./style.css";
 
 import { definePluginSettings } from "@api/Settings";
+import { showToast, Text } from "@components/ForkCompat";
 import { Devs } from "@utils/constants";
 import definePlugin, { OptionType } from "@utils/types";
-import { ChannelStore, GuildStore, Modal, openModal, RTCConnectionStore, showToast, Text, useEffect, UserStore, useState } from "@webpack/common";
+import { ChannelStore, GuildStore, Modal, openModal, RTCConnectionStore, useEffect, UserStore, useState } from "@webpack/common";
 
 type EventType = "join" | "leave" | "move-in" | "move-out";
 
