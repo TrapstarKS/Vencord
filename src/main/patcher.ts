@@ -21,6 +21,7 @@ import electron, { app, BrowserWindowConstructorOptions, Menu } from "electron";
 import { dirname, join } from "path";
 
 import { RendererSettings } from "./settings";
+import { patchTrayMenu } from "./trayMenu";
 import { IS_VANILLA } from "./utils/constants";
 
 console.log("[Vencord] Starting up...");
@@ -59,6 +60,8 @@ if (!IS_VANILLA) {
     } as any;
 
     const settings = RendererSettings.store;
+
+    patchTrayMenu();
 
     // Repatch after host updates on Windows and Linux
     if (process.platform === "win32" || process.platform === "linux") {
@@ -149,6 +152,10 @@ if (!IS_VANILLA) {
     });
 
     process.env.DATA_DIR = join(app.getPath("userData"), "..", "Vencord");
+
+    if (settings.disableBackgroundOptimization !== false) {
+        app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+    }
 } else {
     console.log("[Vencord] Running in vanilla mode. Not loading Vencord");
 }
